@@ -16,8 +16,10 @@
 #   shell <cmd> 在电视上执行任意命令（root 身份）
 #   fix-adb     ADB 失联急救：经 SimpleSSHD(2222免密ssh) 三行配方拉起 root adbd
 #   fix-home    修「切到 HDMI/DTV 后按主页键没反应」之①：user_setup_complete=0 系统拒绝启动桌面
-#   fix-keys    修「遥控器主页键压根没反应」之②：keylayout 把主页键映射成无效 keycode（重启电视后要重跑）
+#   fix-keys    修「遥控器主页键压根没反应」之②：keylayout 把主页键映射成无效 keycode
+#               （bind mount 重启即失效；正常由 APK 自动重挂，见 heal）
 #   home-apk    装信号源一键切换 APK（HDMI1/HDMI2/DTV/AV/回系统桌面/信号源菜单）
+#   heal        手动触发一次 keylayout 自愈（正常不需要：APK 开机 1~2 分钟内自动做）
 # ============================================================
 
 TV="192.168.1.2:5555"
@@ -371,6 +373,24 @@ case "$1" in
     tv "pm grant org.sharmy.chsource android.permission.WRITE_SETTINGS 2>&1; true" >/dev/null 2>&1
     echo "✅ 已安装：桌面会多出 6 个图标（机顶盒 HDMI1 / HDMI2 / DTV / AV / 回到系统桌面 / 信号源菜单）"
     echo "   注：这只是快捷入口；主页键要根治请跑 ./65d2p.sh fix-home"
+    echo "   装完请打开一次本 app（会注册开机自愈任务），并在电视管家 → 权限管理里"
+    echo "   给「信号源」打开 自动启动 / 后台运行"
+    ;;
+
+  heal)
+    # 手动触发一次开机自愈：重挂 keylayout + 软重启框架。
+    # 正常不需要跑 —— APK 里的 JobScheduler 任务会在开机 1~2 分钟内自动做掉。
+    ensure_conn
+    echo "▸ 触发自愈（电视端完成，约 30~60 秒，中途会软重启一次框架）..."
+    tv "am start -n org.sharmy.chsource/.Home --es source __HEAL__ >/dev/null 2>&1; true"
+    sleep 25
+    echo "▸ 等自愈完成 + zygote 重启（约 40 秒，期间 adb 会断）"
+    sleep 40
+    ensure_conn
+    N="$(tv 'grep -c keylayout /proc/mounts' | tr -d '\r')"
+    echo "keylayout 挂载数 = $N （应为 2）"
+    [ "$N" -ge 2 ] 2>/dev/null && echo "✅ 主页键已恢复" \
+      || echo "❌ 没挂上，看 logcat：$ADB -s $TV exec-out sh -c 'logcat -d -s ChSourceHeal'"
     ;;
 
   *)

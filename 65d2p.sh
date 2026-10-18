@@ -15,7 +15,8 @@
 #   pkgs        列出第三方应用 / 已禁用应用
 #   shell <cmd> 在电视上执行任意命令（root 身份）
 #   fix-adb     ADB 失联急救：经 SimpleSSHD(2222免密ssh) 三行配方拉起 root adbd
-#   fix-home    修「切到 HDMI/DTV 后按主页键没反应」（user_setup_complete=0 导致系统拒绝启动桌面）
+#   fix-home    修「切到 HDMI/DTV 后按主页键没反应」之①：user_setup_complete=0 系统拒绝启动桌面
+#   fix-keys    修「遥控器主页键压根没反应」之②：keylayout 把主页键映射成无效 keycode（重启电视后要重跑）
 #   home-apk    装信号源一键切换 APK（HDMI1/HDMI2/DTV/AV/回系统桌面/信号源菜单）
 # ============================================================
 
@@ -323,8 +324,42 @@ case "$1" in
     echo "▸ 修正后"
     tv 'echo -n "  secure user_setup_complete = "; settings get secure user_setup_complete; \
         echo -n "  global device_provisioned   = "; settings get global device_provisioned'
-    echo "✅ 完成。现在切到 HDMI/DTV 后按遥控器「主页」键即可回到当贝桌面"
+    echo "✅ 完成。若遥控器主页键仍然没反应，说明还差 fix-keys（keylayout 那层）："
+    echo "   ./65d2p.sh fix-keys"
     echo "   验证：./65d2p.sh shell \"input keyevent 3\" 然后看前台是否变成 com.dangbei.tvlauncher"
+    ;;
+
+  fix-keys)
+    # ⭐ 修「遥控器主页键压根没反应」（比 fix-home 更底层的一层）
+    #    真因：主页键的扫描码 91 在 keylayout 里被映射成长虹私有 keycode CHANGHONGIR_HOME，
+    #    而本机 libinputflinger 的 keycode 标签表里没有这个名字 → 解析结果 keyCode=0
+    #    （KEYCODE_UNKNOWN），WindowManager 直接判为 Unhandled key 丢弃，logcat：
+    #      D WindowManager: Unhandled key: win=..., keyCode=0, scanCode=91
+    #    dumpsys input 查到的映射文件：
+    #      Hi keyboard (event0)               -> /system/usr/keylayout/Vendor_0001_Product_0001.kl
+    #      Changhong Smart TV Keypad (event3) -> /system/usr/keylayout/Vendor_046d_Product_0002.kl
+    #      注意：名字会骗人，"Changhong Smart TV Keypad" 用的其实是 Vendor_046d_Product_0002.kl
+    #      （只映射了 5 个方向键），遥控器真正的按键走的是 "Hi keyboard"。
+    #    /system 是 ext4 ro 且 remount 被拒（Operation not permitted），改不了 →
+    #    用 bind mount 覆盖 /data/chkeys 下的修复版；bind mount 重启即失效，所以开机后要重跑。
+    ensure_conn
+    KL_DIR="$(dirname "$0")/hdmi1/keylayout"
+    [ -d "$KL_DIR" ] || { echo "❌ 找不到 $KL_DIR"; exit 1; }
+    tv 'mkdir -p /data/chkeys'
+    for f in Vendor_0001_Product_0001.kl Vendor_046d_Product_0002.kl; do
+      tv "umount /system/usr/keylayout/$f 2>/dev/null; true" >/dev/null
+      $ADB -s "$TV" push "$KL_DIR/$f" "/data/chkeys/$f" >/dev/null
+      tv "chmod 644 /data/chkeys/$f"
+      tv "mount -o bind /data/chkeys/$f /system/usr/keylayout/$f 2>&1; true"
+    done
+    echo "▸ 覆盖后的主页键映射："
+    tv 'busybox grep "key 91" /system/usr/keylayout/Vendor_0001_Product_0001.kl /system/usr/keylayout/Vendor_046d_Product_0002.kl'
+    echo "▸ 重启框架让 inputflinger 重新加载 keymap（约 30 秒，画面会闪一下）"
+    tv 'setprop ctl.restart zygote' >/dev/null
+    echo "✅ 完成。等电视画面回来后，切到 HDMI 再按遥控器「主页」键即可回到当贝桌面"
+    echo "   自检：./65d2p.sh shell 'sendevent /dev/input/event0 1 91 1; sendevent /dev/input/event0 1 91 0; sendevent /dev/input/event0 0 0 0'"
+    echo "        再看 logcat 是否出现 keyCode=3 + START cat=[HOME] 当贝"
+    echo "   注意：电视重启后 bind mount 失效，需重跑本命令"
     ;;
 
   home-apk)

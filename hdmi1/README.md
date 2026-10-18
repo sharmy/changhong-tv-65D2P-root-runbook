@@ -96,6 +96,22 @@ adb exec-out sh -c "am start -n org.sharmy.chsource/.Hdmi1 --es source __LIST__"
 adb exec-out sh -c 'logcat -d | /system/bin/busybox grep I/ChSourceSwitch'
 ```
 
+## 切到 HDMI 之后怎么回系统（主页键）
+
+**别指望遥控器主页键直接能用** —— 本机有两个坑，都得填：
+
+1. `Settings.Secure.user_setup_complete=0` → 系统"静默拒绝"启动桌面
+   → `../../65d2p.sh fix-home`
+2. 主页键扫描码 91 在 keylayout 里被映射成 `CHANGHONGIR_HOME`（本机框架无此 keycode，
+   解析成 `keyCode=0` 被丢弃）→ `../../65d2p.sh fix-keys`
+
+第二项靠 bind mount 覆盖 `/system/usr/keylayout/`（只读，remount 被拒），
+**电视重启后失效，需重跑**。细节见 runbook §3.7.1 / §3.7.2。
+
+`keylayout/` 目录就是这份修复的版本，`Vendor_0001_Product_0001.kl.orig` 是原厂原件备份。
+
+APK 里的「回到系统桌面」图标（`__SYS__`）仍保留，作为不依赖按键的备用入口。
+
 ## 逆向备忘（别再重复摸索）
 
 | 项 | 值 |

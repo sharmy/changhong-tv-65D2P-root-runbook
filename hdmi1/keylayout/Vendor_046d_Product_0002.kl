@@ -1,0 +1,7 @@
+key 103	DPAD_UP
+key 105	DPAD_LEFT
+key 28	DPAD_CENTER
+key 106	DPAD_RIGHT
+key 108	DPAD_DOWN
+# 主页键修复（原文件未映射 91，按键被解析为 keyCode=0 直接丢弃）
+key 91	HOME

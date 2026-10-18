@@ -464,6 +464,96 @@ adb exec-out sh -c "settings put secure user_setup_complete 1; settings put glob
 adb exec-out screencap -p > /tmp/s.png && stat -f%z /tmp/s.png
 ```
 
+### 3.7.2 主页键还是没反应 ★★★ 第二层真因：keylayout 把主页键映射成无效 keycode
+
+修完 3.7.1 后用户反馈**遥控器主页键仍然没反应**。这时 `input keyevent 3` 依旧有效，
+说明"系统肯启动桌面"，问题在**按键根本没被解析成 HOME**。
+
+**铁证（logcat，按一下遥控器主页键就看到）**：
+
+```
+D WindowManager: interceptKeyTi keyCode=0 down=true ... deviceName=Hi keyboard
+D WindowManager: Unhandled key: win=Window{...AtvMainActivity}, action=0,
+                 keyCode=0, scanCode=91, metaState=0
+```
+
+`keyCode=0` 就是 `KEYCODE_UNKNOWN` —— WindowManager 把它当"没人要的键"直接丢了。
+
+**根因链**：
+
+1. 遥控器主页键的 Linux 扫描码是 **91**。
+2. `/system/usr/keylayout/Vendor_0001_Product_0001.kl`（长虹红外键表）里写的是
+   `key 91     CHANGHONGIR_HOME`。
+3. 本机 `libinputflinger.so` 的 keycode 标签表里**没有** `CHANGHONGIR_HOME` 这个名字
+   （长虹私有 keycode，本版本框架已不带），解析失败 → 落成 0。
+   （对照：同文件里 `key 76 STAIR_SOURCE` 能正常解析成 `keyCode=2001`，说明标签表只有部分私有键。
+   另注意 `CHANGHONGIR_HOME` 与我们的 APK 里用的 `keyCode 2001` 不是一回事。）
+4. 于是主页键从"按下"到"丢弃"一步都没走到 `launchHomeFromHotKey()`。
+
+**关键的设备名陷阱（我在这里绕了两轮）**：`dumpsys input` 里设备名和键表文件名对不上，
+**名字会骗人**，必须逐块解析：
+
+| 设备（`getevent -p` / `dumpsys input`） | 节点 | 实际加载的 keylayout |
+|---|---|---|
+| `Hi keyboard` | `/dev/input/event0` | `Vendor_0001_Product_0001.kl` ← **遥控器真正的按键走这条** |
+| `Changhong Smart TV Keypad` | `/dev/input/event3` | `Vendor_046d_Product_0002.kl` ← 只有 5 个方向键 |
+
+先按"Changhong Smart TV Keypad"这个名字去改 `Vendor_0001_...` 是改错了文件，
+改完毫无变化。正确查法：
+
+```bash
+# 把 dumpsys input 拉回来，按 "N: 设备名" 分块，逐块找 KeyLayoutFile
+adb exec-out dumpsys input > /tmp/in.txt
+```
+
+**修复（两条路径都补 `key 91 HOME`）**：
+
+```bash
+./65d2p.sh fix-keys
+```
+
+脚本做的事：`hdmi1/keylayout/` 里两份修复版推到 `/data/chkeys/`，`mount -o bind`
+覆盖 `/system/usr/keylayout/` 下的同名文件，再 `setprop ctl.restart zygote`
+让 inputflinger 重新加载键表（画面会黑 30 秒左右）。
+
+- `/system` 是 `ext4 ro`，`mount -o remount,rw /system` 返回 `Operation not permitted`，
+  只能 bind mount；**bind mount 重启即失效**，电视重启后要重跑 `fix-keys`。
+- `/data/system/devices/keylayout/` 这个 AOSP 覆盖目录**本机不生效**（实测放进去后
+  `dumpsys input` 仍解析 `/system/usr/keylayout/...`），别浪费时间。
+
+**验证技巧（很重要）**：`input keyevent 3` 是**注入路径，跳过 keylayout**，
+所以"注入有效"完全不能证明"按键有效"。要复现真实按键必须写 `sendevent` 打原始扫描码：
+
+```bash
+# 模拟按一次遥控器主页键（扫描码 91，event0 = Hi keyboard）
+adb shell 'sendevent /dev/input/event0 1 91 1; \
+           sendevent /dev/input/event0 1 91 0; \
+           sendevent /dev/input/event0 0 0 0'
+```
+
+**修复后实测（2026-10-18）**：
+
+| 步骤 | 前台 | 截图 |
+|---|---|---|
+| 切 HDMI1（进源） | `com.changhong.tvap.atv.activity/.AtvMainActivity` | 18KB（无信号黑屏） |
+| `sendevent 91`（模拟主页键） | `com.dangbei.tvlauncher/...MainActivity` | 754KB（当贝桌面） |
+
+日志同步变为：`interceptKeyTi keyCode=3 ... mHomePressed=true deviceName=Hi keyboard`
+→ `START u0 {act=MAIN cat=[HOME] cmp=com.dangbei.tvlauncher/...}`。
+`event3` 那条路径同样验证通过。
+
+**返回键为什么也没用**：`key 42 BACK` 解析正常（`keyCode=4`），但
+`AtvMainActivity` 自己不处理，也不 finish，于是同样落到
+`Unhandled key ... keyCode=4, scanCode=42`。TV 信号源界面"无路可退"，属正常行为，
+不是故障；修好主页键后不需要返回键。若确实想让返回键回桌面，可把 `key 42` 也改成
+`HOME`，但**会破坏所有 app 内的返回键**，不建议。
+
+**踩坑记录**：
+- `adb push` 覆盖一个正在被 bind mount 的源文件，`/proc/mounts` 里挂载点会变成
+  `...(deleted)`（指向已删除的 inode），看起来还挂着、内容却是旧的。改配置前先
+  `umount`，再 push，再 mount。
+- 想省事只改 `event3` 那份（`Vendor_046d_...`）没有用，遥控器走的是 `event0`。
+
 ## 4. C. 封死 OTA（三层）
 
 ### 层 1 — 光猫网址过滤（网络层，已配置）
@@ -482,11 +572,19 @@ huan.tv    upgrade2    smart-tv    chsmarttv    hifuntv    chiq-cloud
 ```
 禁用：`com.changhong.systemupgrade`、`com.changhong.dmt.upgrade`、`com.changhong.upgrade`、`com.changhong.upgradechiq`
 
-### 层 3 — hosts（❌ 做不到，已尝试）
-`mount -o remount,rw /system` 返回 `Operation not permitted`。
-排查结论：SELinux **已是 Disabled**，busybox mount 也报 `permission denied (are you root?)`
-→ **adbd 的 capabilities 被内核限制**（uid=0 但没有 CAP_SYS_ADMIN）。
-所以 `/system` 改不了，hosts、去开机广告、彻底卸载预装都做不了，除非刷机改包。
+### 层 3 — hosts（✅ 已落地，用 bind mount 绕过只读）
+`mount -o remount,rw /system` 返回 `Operation not permitted`（SELinux 已是 Disabled，
+不是它挡的；`/system` 是 `ext4 ro,norecovery`，内核侧不放行 rw 重挂）。
+
+**但 bind mount 是可以的** —— `/data` 上写一份新文件，直接挂到 `/system` 里的目标路径上
+（详见 §3.6 与 §3.7.2）：
+
+```bash
+adb exec-out sh -c "chmod 644 /data/local/tmp/hosts; \
+  mount -o bind /data/local/tmp/hosts /system/etc/hosts"
+```
+
+局限：**bind mount 重启即失效**，已并入 `./65d2p.sh fix-adb` 的开机必跑流程。
 
 **实际效果：层 1 + 层 2 已足够**，电视「检查更新」失败。
 

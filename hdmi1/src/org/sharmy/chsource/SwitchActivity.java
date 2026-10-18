@@ -1,0 +1,223 @@
+package org.sharmy.chsource;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.util.Log;
+import android.widget.Toast;
+
+import java.lang.reflect.Method;
+
+/**
+ * 长虹 65D2P（ZLH74GiR / Android 5.1.1）信号源一键切换。
+ *
+ * 原理：系统把 /system/framework/com.changhong.tvos.jar 放进了 BOOTCLASSPATH，
+ * 因此任意 app 都能反射调用长虹私有 TVOS SDK：
+ *     TVManager.getInstance(ctx).getATVPlayer()
+ *         .startInputSource(EnumInputSource.E_INPUT_SOURCE_HDMI, 15)
+ * 这正是系统「信号源」菜单（com.changhong.SourceMenu → MenuSource.changeSource）
+ * 内部使用的同一条调用链。
+ *
+ * 切到哪个源由 activity-alias 的 <meta-data android:name="source"> 决定。
+ * 注：切换会写 Settings.System，需要 WRITE_SETTINGS 权限（root 下用 pm grant 授予）。
+ */
+public class SwitchActivity extends Activity {
+
+    private static final String TAG = "ChSourceSwitch";
+    public static final String META_SOURCE = "source";
+
+    private static final String C_TV_MANAGER = "com.changhong.tvos.common.TVManager";
+    private static final String C_ITV_PLAYER = "com.changhong.tvos.common.ITVPlayer";
+    private static final String C_ISRC_MGR   = "com.changhong.tvos.common.ISourceManager";
+    private static final String C_ENUM_SRC   = "com.changhong.tvos.model.EnumInputSource";
+    private static final String C_ENUM_PIP   = "com.changhong.tvos.model.ChOsType$EnumPipInputSource";
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        String src = "E_INPUT_SOURCE_HDMI";
+        // adb 调试用：am start -n org.sharmy.chsource/.Hdmi1 --es source __LIST__
+        String fromIntent = getIntent() == null ? null : getIntent().getStringExtra(META_SOURCE);
+        if (fromIntent != null && fromIntent.length() > 0) {
+            src = fromIntent;
+        } else {
+            try {
+                ActivityInfo ai = getPackageManager()
+                        .getActivityInfo(getComponentName(), PackageManager.GET_META_DATA);
+                if (ai != null && ai.metaData != null) {
+                    String s = ai.metaData.getString(META_SOURCE);
+                    if (s != null && s.length() > 0) {
+                        src = s;
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "read meta-data failed", t);
+            }
+        }
+
+        String msg = "__MENU__".equals(src)
+                ? openSourceMenu() : switchTo(getApplicationContext(), src);
+        Log.i(TAG, msg);
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+
+        getWindow().getDecorView().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                finish();
+            }
+        }, 2200);
+    }
+
+    /** 弹出系统原生「信号源」菜单（SourceMenuService 的 menuSource 指令） */
+    private String openSourceMenu() {
+        try {
+            android.content.Intent i = new android.content.Intent("CH_MENU_SOURCE");
+            i.setClassName("com.changhong.SourceMenu", "com.changhong.source.SourceMenuService");
+            i.putExtra("MenuSource", "menuSource");
+            i.putExtra("keyCode", 2001);
+            startService(i);
+            return "已打开信号源菜单";
+        } catch (Throwable t) {
+            Log.e(TAG, "openSourceMenu failed", t);
+            return "打开失败：" + shortErr(t);
+        }
+    }
+
+    static String switchTo(Context ctx, String enumName) {
+        StringBuilder detail = new StringBuilder();
+        try {
+            Object tvManager = Class.forName(C_TV_MANAGER)
+                    .getMethod("getInstance", Context.class).invoke(null, ctx);
+            if (tvManager == null) {
+                return "TVManager 未初始化";
+            }
+
+            // 诊断：列出本机支持的信号源
+            if ("__LIST__".equals(enumName)) {
+                return "支持：" + supportedList(tvManager)
+                        + " 当前：" + pretty(currentSource(tvManager));
+            }
+
+            Class<?> enumCls = Class.forName(C_ENUM_SRC);
+            Object target = null;
+            for (Object v : (Object[]) enumCls.getMethod("values").invoke(null)) {
+                if (enumName.equals(((Enum<?>) v).name())) {
+                    target = v;
+                    break;
+                }
+            }
+            if (target == null) {
+                return "未知信号源 " + enumName;
+            }
+
+            // 路径 A：与系统信号源菜单完全一致（startInputSource）
+            boolean aOk = false;
+            try {
+                Object player = tvManager.getClass().getMethod("getATVPlayer").invoke(tvManager);
+                Method m = Class.forName(C_ITV_PLAYER)
+                        .getMethod("startInputSource", enumCls, int.class);
+                Object rc = m.invoke(player, target, 15);
+                detail.append("A:ok(").append(rc).append(") ");
+                aOk = true;
+            } catch (Throwable t) {
+                detail.append("A:").append(shortErr(t)).append(" ");
+                Log.w(TAG, "startInputSource 异常", t);
+            }
+
+            // 路径 B：仅当 A 失败时才补一次 ISourceManager.selectInputSource
+            if (!aOk) {
+                try {
+                    Object srcMgr = tvManager.getClass().getMethod("getSourceManager").invoke(tvManager);
+                    Method m2 = Class.forName(C_ISRC_MGR).getMethod("selectInputSource", enumCls);
+                    Object rc2 = m2.invoke(srcMgr, target);
+                    detail.append("B:ok(").append(rc2).append(") ");
+                } catch (Throwable t) {
+                    detail.append("B:").append(shortErr(t)).append(" ");
+                    Log.w(TAG, "selectInputSource 异常", t);
+                }
+            }
+
+            // 以「当前实际信号源」为准判定结果
+            String now = currentSource(tvManager);
+            if (enumName.equals(now)) {
+                return "已切换到 " + pretty(enumName);
+            }
+            return "切换未生效（当前=" + pretty(now) + " 目标=" + pretty(enumName) + "） " + detail;
+        } catch (Throwable t) {
+            Log.e(TAG, "switchTo(" + enumName + ") failed", t);
+            return "切换失败：" + shortErr(t);
+        }
+    }
+
+    /** 读回当前主画面信号源名（失败返回 ""） */
+    private static String currentSource(Object tvManager) {
+        try {
+            Class<?> enumCls = Class.forName(C_ENUM_SRC);
+            Class<?> pipCls = Class.forName(C_ENUM_PIP);
+            Object main = null;
+            for (Object v : (Object[]) pipCls.getMethod("values").invoke(null)) {
+                if ("E_MAIN_INPUT_SOURCE".equals(((Enum<?>) v).name())) {
+                    main = v;
+                    break;
+                }
+            }
+            Object srcMgr = tvManager.getClass().getMethod("getSourceManager").invoke(tvManager);
+            Method m = Class.forName(C_ISRC_MGR).getMethod("getCurInputSource", pipCls);
+            Object cur = m.invoke(srcMgr, main);
+            return cur == null ? "" : ((Enum<?>) cur).name();
+        } catch (Throwable t) {
+            Log.w(TAG, "getCurInputSource 失败", t);
+            return "";
+        }
+    }
+
+    private static String supportedList(Object tvManager) {
+        try {
+            Object srcMgr = tvManager.getClass().getMethod("getSourceManager").invoke(tvManager);
+            Object list = Class.forName(C_ISRC_MGR).getMethod("getInputSourceList").invoke(srcMgr);
+            StringBuilder sb = new StringBuilder();
+            for (Object v : (java.util.List<?>) list) {
+                if (sb.length() > 0) {
+                    sb.append(",");
+                }
+                sb.append(pretty(((Enum<?>) v).name()));
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            Log.w(TAG, "getInputSourceList 失败", t);
+            return shortErr(t);
+        }
+    }
+
+    private static String shortErr(Throwable t) {
+        Throwable r = t;
+        while (r.getCause() != null) {
+            r = r.getCause();
+        }
+        String s = r.getClass().getSimpleName();
+        if (r.getMessage() != null) {
+            s += ": " + r.getMessage();
+        }
+        return s;
+    }
+
+    private static String pretty(String n) {
+        if (n == null) {
+            return "?";
+        }
+        if (n.startsWith("E_INPUT_SOURCE_")) {
+            String s = n.substring("E_INPUT_SOURCE_".length());
+            if (s.equals("HDMI")) {
+                return "HDMI1";
+            }
+            if (s.startsWith("HDMI") && s.length() == 5) {
+                return "HDMI" + s.substring(4);
+            }
+            return s;
+        }
+        return n;
+    }
+}

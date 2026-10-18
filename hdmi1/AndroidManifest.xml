@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.sharmy.chsource"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="22" android:targetSdkVersion="22" />
+
+    <!-- TVServiceHandler 切源时会写 Settings.System，缺这个权限会被抛 SecurityException -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
+    <application
+        android:label="信号源"
+        android:icon="@drawable/ic_menu"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+
+        <activity
+            android:name=".SwitchActivity"
+            android:label="信号源"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 主图标：HDMI1（机顶盒） -->
+        <activity-alias
+            android:name=".Hdmi1"
+            android:targetActivity=".SwitchActivity"
+            android:label="机顶盒 HDMI1"
+            android:icon="@drawable/ic_hdmi1"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="E_INPUT_SOURCE_HDMI" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".Hdmi2"
+            android:targetActivity=".SwitchActivity"
+            android:label="HDMI2"
+            android:icon="@drawable/ic_hdmi2"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="E_INPUT_SOURCE_HDMI2" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".Dtv"
+            android:targetActivity=".SwitchActivity"
+            android:label="数字电视 DTV"
+            android:icon="@drawable/ic_dtv"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="E_INPUT_SOURCE_DTV" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".Av"
+            android:targetActivity=".SwitchActivity"
+            android:label="AV 音视频"
+            android:icon="@drawable/ic_av"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="E_INPUT_SOURCE_CVBS" />
+        </activity-alias>
+
+        <!-- 直接弹出系统原生「信号源」菜单 -->
+        <activity-alias
+            android:name=".Menu"
+            android:targetActivity=".SwitchActivity"
+            android:label="信号源菜单"
+            android:icon="@drawable/ic_menu"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="__MENU__" />
+        </activity-alias>
+
+    </application>
+</manifest>

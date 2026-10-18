@@ -319,6 +319,81 @@ am force-stop tv.huan.recognizecoreV551
 **验证方法**：重启电视，若开机不再出现京东/电商全屏图 → 定案；若仍有 → 回滚本包，改查
 `com.changhong.chusercenter`（长虹用户中心，开机请求 jfapi.chiq-cloud.com 积分API，第2938号进程）。
 
+## 3.7 信号源一键切换 APK（HDMI1 机顶盒 / HDMI2 / DTV / AV / 信号源菜单）★2026-10-18 实机验证通过
+
+需求：桌面上放一个图标，点一下直接切到 HDMI1（机顶盒），不用再按遥控器「信号源」再选。
+
+### 结论：能切，而且用的就是系统内部同一条调用链
+
+系统把 `/system/framework/com.changhong.tvos.jar` 写进了 `BOOTCLASSPATH`
+（`/init.environ.rc` 可见），**任意第三方 app 都能直接反射调用长虹私有 TVOS SDK**：
+
+```java
+TVManager.getInstance(ctx)                       // com.changhong.tvos.common
+        .getATVPlayer()                          // com.changhong.tvos.atv.IATVPlayer
+        .startInputSource(EnumInputSource.E_INPUT_SOURCE_HDMI, 15);
+```
+
+这跟系统「信号源」菜单（`com.changhong.SourceMenu` → `MenuSource.changeSource`）
+**是同一句代码**（反汇编 `SourceMenu.apk` 的 dex 可证）。
+
+### 关键事实（逆向所得，别再重复摸索）
+
+| 项 | 值 |
+|---|---|
+| SDK jar | `/system/framework/com.changhong.tvos.jar`（BOOTCLASSPATH，无需打包进 APK） |
+| 服务 | `ServiceManager.getService("CHTVService")` → `com.changhong.tvos.service.ITVService`（跑在 system_server，pid 1985） |
+| 切换 API | `ITVPlayer.startInputSource(EnumInputSource, int)` **返回 boolean**，第二参（15）在 `PlayerImpl` 里被硬编码成 0，随便传 |
+| 备用 API | `ISourceManager.selectInputSource(EnumInputSource)`；切完再 `getCurInputSource(E_MAIN_INPUT_SOURCE)` 读回校验 |
+| `EnumInputSource` 序号 | ATV=0, DTV=1, CVBS=2…, **HDMI=19（HDMI1）**, HDMI2=20, HDMI3=21, HDMI4=22 … 共 35 个 |
+| 本机实际支持 | **ATV, DTV, CVBS, HDMI1, HDMI2**（`getInputSourceList()` 实测，**没有 HDMI3**） |
+| 坑 1 | `TVManager.getInstance()` **要带 Context 参数**（`getInstance(Context)`），无参版不存在 |
+| 坑 2 | 切源会写 `Settings.System` → 缺 `WRITE_SETTINGS` 会被抛 `SecurityException: Permission denial: writing to settings`；manifest 声明即可，必要时 `pm grant` |
+| 坑 3 | 切完系统会自己拉起 `com.changhong.tvap.atv.activity.AtvMainActivity`（与遥控器操作一致，属正常） |
+
+### 交付物
+
+`hdmi1/` 目录（源码 + 手工构建脚本，**不需要 Android Studio / Gradle**）：
+
+| 图标 | 作用 |
+|---|---|
+| 机顶盒 HDMI1 | 切到 `E_INPUT_SOURCE_HDMI` |
+| HDMI2 | 切到 `E_INPUT_SOURCE_HDMI2` |
+| 数字电视 DTV | 切到 `E_INPUT_SOURCE_DTV` |
+| AV 音视频 | 切到 `E_INPUT_SOURCE_CVBS` |
+| 信号源菜单 | 直接弹系统原生信号源浮层 |
+
+实现要点：一个 `SwitchActivity` + 5 个 `activity-alias`，每个 alias 用
+`<meta-data android:name="source" android:value="E_INPUT_SOURCE_HDMI">` 声明目标源，
+Activity 里读 alias 的 metaData 决定切哪个 —— 一份代码出多个桌面图标。
+
+```bash
+# 构建（需 JDK 17 + aapt2/d8/zipalign/apksigner，build.sh 里自动找 /tmp/android 下的工具链）
+cd hdmi1 && ./build.sh
+
+# 安装
+adb install -r hdmi1/build/信号源切换-HDMI1.apk
+# 若报 SecurityException: writing to settings
+adb exec-out sh -c "pm grant org.sharmy.chsource android.permission.WRITE_SETTINGS"
+
+# adb 直接切（不点图标也行）
+adb exec-out sh -c "am start -n org.sharmy.chsource/.Hdmi1"
+# 查询本机支持的信号源
+adb exec-out sh -c "am start -n org.sharmy.chsource/.Hdmi1 --es source __LIST__"
+adb exec-out sh -c 'logcat -d | /system/bin/busybox grep I/ChSourceSwitch'
+```
+
+### 实机验证结果（2026-10-18）
+
+```
+Hdmi2 -> 已切换到 HDMI2
+Dtv   -> 已切换到 DTV
+Hdmi1 -> 已切换到 HDMI1
+Av    -> 已切换到 CVBS
+Menu  -> 已打开信号源菜单
+Hdmi1 -> 已切换到 HDMI1
+```
+
 ## 4. C. 封死 OTA（三层）
 
 ### 层 1 — 光猫网址过滤（网络层，已配置）

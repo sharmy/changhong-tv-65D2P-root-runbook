@@ -80,6 +80,21 @@
             <meta-data android:name="source" android:value="E_INPUT_SOURCE_CVBS" />
         </activity-alias>
 
+        <!-- 从 HDMI / DTV 回到安卓系统桌面（等价遥控器「主页」键） -->
+        <activity-alias
+            android:name=".Home"
+            android:targetActivity=".SwitchActivity"
+            android:label="回到系统桌面"
+            android:icon="@drawable/ic_home"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="source" android:value="__HOME__" />
+        </activity-alias>
+
         <!-- 直接弹出系统原生「信号源」菜单 -->
         <activity-alias
             android:name=".Menu"

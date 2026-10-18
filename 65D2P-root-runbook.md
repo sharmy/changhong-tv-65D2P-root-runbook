@@ -361,6 +361,7 @@ TVManager.getInstance(ctx)                       // com.changhong.tvos.common
 | HDMI2 | 切到 `E_INPUT_SOURCE_HDMI2` |
 | 数字电视 DTV | 切到 `E_INPUT_SOURCE_DTV` |
 | AV 音视频 | 切到 `E_INPUT_SOURCE_CVBS` |
+| **回到系统桌面** | **从 HDMI/DTV 切回安卓系统（等价遥控器「主页」键）** |
 | 信号源菜单 | 直接弹系统原生信号源浮层 |
 
 实现要点：一个 `SwitchActivity` + 5 个 `activity-alias`，每个 alias 用
@@ -393,6 +394,25 @@ Av    -> 已切换到 CVBS
 Menu  -> 已打开信号源菜单
 Hdmi1 -> 已切换到 HDMI1
 ```
+
+### 3.7.1 切到 HDMI 后怎么回到安卓系统
+
+**结论：遥控器「主页」键（小房子）即可**，与下面这条命令/图标完全等价：
+
+```bash
+adb exec-out sh -c "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+```
+
+**原理**（这决定了为什么"主页"能回去，而其他键不行）：
+切到 HDMI 时，系统只是把 `com.changhong.tvap.atv.activity.AtvMainActivity`
+（TV 画面播放窗口）拉到前台，**安卓桌面一直在后台没退出**。发 HOME intent
+就是把桌面（当贝桌面）重新顶到前台，AtvMainActivity 退到后台，画面即回到安卓系统。
+
+所以：
+- **信号源菜单里没有「Android / 智能系统」这一项**（`getInputSourceList()` 实测只有
+  ATV/DTV/CVBS/HDMI1/HDMI2），**别去信号源菜单里找回去的入口**——找不到。
+- 回到系统的入口只有**前台 Activity 切换**（主页键 / HOME intent），不是信号源切换。
+- APK 里的「回到系统桌面」图标就是发这个 HOME intent，方便遥控器不在手边时用。
 
 ## 4. C. 封死 OTA（三层）
 

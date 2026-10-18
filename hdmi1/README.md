@@ -1,8 +1,21 @@
 # 长虹 65D2P 信号源一键切换 APK
 
-桌面上放图标，点一下直接切到 HDMI1（机顶盒）/ HDMI2 / DTV / AV / 系统信号源菜单。
+桌面上放图标，点一下直接切到 HDMI1（机顶盒）/ HDMI2 / DTV / AV，
+或弹系统信号源菜单，或**从 HDMI 切回安卓系统桌面**。
 适用：长虹 65D2P（机芯 ZLH74GiR，V1.00039，Android 5.1.1，HiSilicon hi551）。
 其他长虹机芯大概率通用（只要 `/system/framework/com.changhong.tvos.jar` 存在）。
+
+## 切到 HDMI 后怎么回到安卓系统
+
+**遥控器「主页」键（小房子）直接回**，与「回到系统桌面」图标、以及
+`adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME` 完全等价。
+
+原理：切 HDMI 时系统只是把 `com.changhong.tvap.atv.activity.AtvMainActivity`（TV 画面窗口）
+拉到前台，**安卓桌面一直在后台没退出**；发 HOME intent 把桌面重新顶到前台即可。
+
+⚠️ 别去信号源菜单里找「Android / 智能系统」——本机 `getInputSourceList()` 实测只有
+ATV / DTV / CVBS / HDMI1 / HDMI2，**没有回系统的信号源项**。
+回系统属于前台 Activity 切换，不是信号源切换，这是两回事。
 
 ## 原理
 
@@ -22,7 +35,7 @@ TVManager.getInstance(ctx)      // com.changhong.tvos.common.TVManager
 
 ```
 hdmi1/
-├── AndroidManifest.xml                       # 1 个 Activity + 5 个 activity-alias
+├── AndroidManifest.xml                       # 1 个 Activity + 6 个 activity-alias
 ├── src/org/sharmy/chsource/SwitchActivity.java
 ├── res/drawable-nodpi/ic_*.png               # 图标（Pillow 生成）
 ├── build.sh                                  # 手工构建脚本（不用 Gradle）

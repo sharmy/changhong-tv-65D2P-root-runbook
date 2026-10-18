@@ -58,8 +58,14 @@ public class SwitchActivity extends Activity {
             }
         }
 
-        String msg = "__MENU__".equals(src)
-                ? openSourceMenu() : switchTo(getApplicationContext(), src);
+        String msg;
+        if ("__MENU__".equals(src)) {
+            msg = openSourceMenu();
+        } else if ("__HOME__".equals(src)) {
+            msg = goHome();
+        } else {
+            msg = switchTo(getApplicationContext(), src);
+        }
         Log.i(TAG, msg);
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
 
@@ -69,6 +75,27 @@ public class SwitchActivity extends Activity {
                 finish();
             }
         }, 2200);
+    }
+
+    /**
+     * 从 HDMI / DTV 回到安卓系统桌面（等价于遥控器「主页」键）。
+     *
+     * 说明：切到 HDMI 时系统会拉起 com.changhong.tvap.atv.activity.AtvMainActivity
+     * 占住前台显示 TV 画面；发 HOME intent 把桌面（当前是当贝桌面）重新顶到前台，
+     * AtvMainActivity 退到后台，画面就回到安卓系统了。
+     */
+    private String goHome() {
+        try {
+            android.content.Intent home = new android.content.Intent(android.content.Intent.ACTION_MAIN);
+            home.addCategory(android.content.Intent.CATEGORY_HOME);
+            home.setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            startActivity(home);
+            return "已回到系统桌面";
+        } catch (Throwable t) {
+            Log.e(TAG, "goHome failed", t);
+            return "回到桌面失败：" + shortErr(t);
+        }
     }
 
     /** 弹出系统原生「信号源」菜单（SourceMenuService 的 menuSource 指令） */

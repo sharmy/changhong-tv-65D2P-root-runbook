@@ -147,14 +147,17 @@ APK 里的「回到系统桌面」图标（`__SYS__`）仍保留，作为不依�
 | 6511 | 一次性 + 自续期，60~120s | 主力。deadline 是绝对时刻，开几小时后早已过期，重启一恢复就 overdue 立刻执行 |
 | 6510 | 周期 15 分钟 | 兜底（API 22 最小周期） |
 
-顺带监听 `CONNECTIVITY_CHANGE` 等广播做"早起"触发（实测系统发的能收到）。
+顺带监听 `BOOT_COMPLETED` / `CONNECTIVITY_CHANGE` / `USER_PRESENT` / `SCREEN_ON` 等广播做
+"早起"触发 —— 前提是包名**不在** `/chperm/preapp/killbackground` 里（在电视管家开
+「自动启动 + 后台运行」即可），**而且改完要重启一次**才生效：这份名单是 system_server
+开机时读一次的，不重启的话所有静态广播都送不到（容易误判成"被系统拦了"）。
 
 ⚠️ 两个坑：`JobService` 的 `android:exported` **必须是 `true`**（写成 false 会一直 READY
 但永不执行，且不报错）；`adbd` 同时只认一个连接，电脑连着时电视端必然超时，所以带 8 次重试。
 
-⚠️ 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 给「信号源」打开（只需开一次）。
-它写的是 `/chperm/preapp/{AppWhiteList,keeprunning,popwindowwhitelist}`；
-同时务必确认包名**不在** `killbackground`（后台必杀）里。
+⚠️ 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 给「信号源」打开，**然后重启电视一次**。
+它写的是 `/chperm/preapp/{AppWhiteList,keeprunning,popwindowwhitelist}`，并把包名从
+`killbackground`（后台必杀）里移除；这份名单 system_server 开机只读一次，**不重启不生效**。
 
 ⚠️ 副作用：自愈成功后会软重启 zygote，开机 1~2 分钟内桌面会重新加载一次。
 

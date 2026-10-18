@@ -374,7 +374,8 @@ case "$1" in
     echo "✅ 已安装：桌面会多出 6 个图标（机顶盒 HDMI1 / HDMI2 / DTV / AV / 回到系统桌面 / 信号源菜单）"
     echo "   注：这只是快捷入口；主页键要根治请跑 ./65d2p.sh fix-home"
     echo "   装完请打开一次本 app（会注册开机自愈任务），并在电视管家 → 权限管理里"
-    echo "   给「信号源」打开 自动启动 / 后台运行"
+    echo "   给「信号源」打开 自动启动 / 后台运行，然后【重启电视一次】才生效"
+    echo "   （/chperm/preapp/killbackground 名单是 system_server 开机时读一次的）"
     ;;
 
   heal)

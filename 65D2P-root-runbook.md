@@ -568,7 +568,8 @@ adb shell 'sendevent /dev/input/event0 1 91 1; \
 | init 钩子（`/etc/script/*.sh`、`install-recovery.sh`） | 全在只读区：`/etc -> /system/etc`，rootfs 也是 `rootfs ro` |
 | `/system/xbin/su` | `-rwsr-x--- root:shell`，第三方 app 不在 shell 组 |
 | `/system/xbin/csu` | setuid root 但有 uid 白名单：`uid 10026 not allowed` |
-| **静态广播 BOOT_COMPLETED** | **被长虹拦掉**，进程根本拉不起来 |
+
+**静态广播其实没被拦**（见下方"广播的真正门槛"），别再往"长虹拦广播"的方向查了。
 
 **突破口**：本机 adbd 以 root 运行且 `ro.adb.secure=0`（不校验 RSA），于是 app 走
 `127.0.0.1:5555` 用 adb 协议直接拿到 root shell —— 全程电视内部完成，不需要电脑也不需要 root 权限。
@@ -577,10 +578,10 @@ adb shell 'sendevent /dev/input/event0 1 91 1; \
 
 **触发方式（实测）**
 
-1. **`CONNECTIVITY_CHANGE` 真实广播能收到**（开机联网后很早）。注意：`am broadcast` 手动发的
-   一律收不到，只有系统自己发的能到；`BOOT_COMPLETED` / `USER_PRESENT` / `SCREEN_ON` /
-   `MY_PACKAGE_REPLACED` 手动发也收不到。
-2. **JobScheduler 是真正的兜底**。双任务：
+1. **广播。前提是包名不在 `/chperm/preapp/killbackground` 里，且改完要重启（详见下）。**
+   满足后 `BOOT_COMPLETED` / `USER_PRESENT` / `SCREEN_ON` / `CONNECTIVITY_CHANGE` /
+   `MY_PACKAGE_REPLACED` 全部实测可送达，开机联网阶段就能触发，比 Job 还早一点。
+2. **JobScheduler 是兜底**。双任务：
    - `JOB 6511`：一次性 + 自续期，`setMinimumLatency(60s).setOverrideDeadline(120s).setPersisted(true)`，
      每次跑完再排下一次。
    - `JOB 6510`：周期 15 分钟兜底（API 22 允许的最小周期）。
@@ -597,15 +598,31 @@ JobScheduler 重启一恢复就判定 overdue，**1~2 分钟内立刻执行**。
 - `adbd 同时只认一个连接`。Mac 连着的时候电视端自连必然 `SocketTimeoutException`，
   所以 `Healer` 里带 8 次重试，每次失败先走一遍三行配方重启 adbd。
 
+**广播的真正门槛：`killbackground` + 必须重启**（2026-10-18 22:33 实测澄清）
+
+一度以为"长虹拦第三方静态广播"——**错的**。真实原因是包名还在 `/chperm/preapp/killbackground`
+（后台必杀名单）里，而且这份名单是 **system_server 开机时读一次**的，改完不重启就不生效。
+
+| 时刻 | 事件 | 手动发广播 |
+|---|---|---|
+| 21:31 | 直接往 `keeprunning`/`AppWhiteList` 写包名（未重启） | ❌ |
+| 22:01 | 在电视管家开「自动启动 + 后台运行」→ 系统把包名移出 `killbackground` | ❌（仍未重启） |
+| 22:08 | 重装 APK，系统自动发 `MY_PACKAGE_REPLACED` | ❌ |
+| 22:22 | 真重启 | — |
+| 22:33 | 再手动发 `BOOT_COMPLETED`/`USER_PRESENT`/`SCREEN_ON`/`MY_PACKAGE_REPLACED` | ✅ 全部收到 |
+
+结论：**只写 `keeprunning` 不够，关键是 `killbackground` 里不能有包名，且改完一定要重启。**
+排查时别用"手动 am broadcast 收不到"当成"被拦"的证据 —— 先确认是不是还没重启。
+
 **电视管家侧必须开的权限**（用户手动开一次即可，永久生效）：
-设置 → 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 信号源 = 开。
+设置 → 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 信号源 = 开，**然后重启电视一次**。
 它实际写的是 `/chperm/preapp/`：
 
 | 文件 | 作用 | 信号源应在 |
 |---|---|---|
 | `AppWhiteList` | 应用白名单 | ✅ 在 |
 | `keeprunning` | 保活白名单（不在里面的进程被 system_server **keepkilling** 杀掉，日志 `--this one is in keepkilling file ,so kill it--`） | ✅ 在 |
-| `killbackground` | **后台必杀名单** | ❌ **绝不能在** |
+| `killbackground` | **后台必杀 + 连静态广播一起废掉** | ❌ **绝不能在** |
 | `popwindowwhitelist` | 悬浮窗白名单 | ✅ 在（已不用悬浮窗，留着无害） |
 
 **真重启验证（2026-10-18 22:2x）**

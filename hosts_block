@@ -1,0 +1,82 @@
+127.0.0.1	localhost
+# 长虹 65D2P 广告/升级域名黑名单
+# 来源：用户提供的《长虹电视禁止广告升级网址统计》+ 本机实测补充（当贝系）
+# 用法：改完本文件后跑  ./65d2p.sh hosts-lock  生效；还原 ./65d2p.sh hosts-unlock
+# 注意：原文件用的是 `127.0.0.1 a;b;` 分号格式（非标准），已拆分每域名一行
+
+# ---- 广告 / 统计 / 桌面配置 ----
+127.0.0.1	ads.huan.tv
+127.0.0.1	alicdn.epg.huan.tv
+127.0.0.1	chc.ads.huan.tv
+127.0.0.1	commdata.v.qq.com
+127.0.0.1	config.chsmarttv.com
+127.0.0.1	d.appstore.huan.tv
+127.0.0.1	d.chapp.huan.tv
+127.0.0.1	data.chsmarttv.com
+127.0.0.1	domain.aishengji.com
+127.0.0.1	epg.huan.tv
+127.0.0.1	game.loveota.com
+127.0.0.1	jfapi.chiq-cloud.com
+127.0.0.1	launcher.smart-tv.cn
+127.0.0.1	launcherimg.smart-tv.cn
+127.0.0.1	livemonitor.huan.tv
+127.0.0.1	loc.map.baidu.com
+127.0.0.1	log.appstore3.huan.tv
+127.0.0.1	log.vcgame.cn
+127.0.0.1	mission-pub.smart-tv.cn
+127.0.0.1	monitor-ads.huan.tv
+127.0.0.1	monitor.uu.qq.com
+127.0.0.1	pingma.qq.com
+127.0.0.1	sdkconfig.video.qq.com
+127.0.0.1	ss.chiq-cloud.com
+127.0.0.1	vv.video.qq.com
+127.0.0.1	www.epg.huan.tv
+
+# ---- 系统升级（封了正好，OTA 已另禁） ----
+127.0.0.1	download.changhong.upgrade2.huan.tv
+127.0.0.1	downloadxml.changhong.upgrade2.huan.tv
+127.0.0.1	service.changhong.upgrade2.huan.tv
+127.0.0.1	sys-update.ch.hifuntv.com
+127.0.0.1	update.lejiao.tv
+
+# ---- 当贝 推荐/统计 ----
+127.0.0.1	ads.cedock.com
+127.0.0.1	adsboot-cdn.cedock.com
+127.0.0.1	api.downbei.com
+127.0.0.1	boot-ads.cedock.com
+127.0.0.1	otysdktj.tvfuwu.com
+127.0.0.1	tvuser-ch.cedock.com
+127.0.0.1	zmapi.dangbei.net
+
+# ---- ⚠ 语音识别（封了遥控器语音失效，不需要就删这几行） ----
+127.0.0.1	dev.voicecloud.cn
+127.0.0.1	itv2-id.openspeech.cn
+127.0.0.1	itv2-up.openspeech.cn
+127.0.0.1	newvoice.chiq5.smart-tv.cn
+127.0.0.1	scs.openspeech.cn
+
+# ---- ⚠ NTP 时间同步（封了电视时间可能不准，不需要就删这几行） ----
+127.0.0.1	0.cn.pool.ntp.org
+127.0.0.1	ntp.tuxfamily.net
+127.0.0.1	s3a.time.edu.cn
+127.0.0.1	time.chiq-cloud.com
+
+# ---- ⚠ 长虹账号认证（登录异常就删这几行） ----
+127.0.0.1	authenticate.chiq-cloud.com
+127.0.0.1	uapi.chiq-cloud.com
+
+# ---- 爱奇艺TV版 Cupid 开机屏广告（15秒视频，真凶；2026-10-18 从 cupidBootScreenResponse 提取）----
+# 广告投放/打点/监测接口（封了只影响广告）
+127.0.0.1	t7z.cupid.ptqy.gitv.tv
+127.0.0.1	kjp.cupid.ptqy.gitv.tv
+127.0.0.1	msg.ptqy.gitv.tv
+127.0.0.1	v2.reachmax.cn
+127.0.0.1	iqiyi-mipdx.cn.miaozhen.com
+127.0.0.1	qtsftl.m.cn.miaozhen.com
+# ⚠ 素材CDN（bkcrs 12条15秒开机视频从这里下载；但正片/封面也可能走这里，若还要用爱奇艺看剧就删这几行）
+127.0.0.1	data.video.ptqy.gitv.tv
+127.0.0.1	meta-cdn.video.ptqy.gitv.tv
+127.0.0.1	pic3.ptqy.gitv.tv
+127.0.0.1	pic4.ptqy.gitv.tv
+127.0.0.1	pic5.ptqy.gitv.tv
+127.0.0.1	pic5.qiyipic.com

@@ -20,6 +20,9 @@
 #               （bind mount 重启即失效；正常由 APK 自动重挂，见 heal）
 #   home-apk    装信号源一键切换 APK（HDMI1/HDMI2/DTV/AV/回系统桌面/信号源菜单）
 #   heal        手动触发一次 keylayout 自愈（正常不需要：APK 开机 1~2 分钟内自动做）
+#   bootlogo <图> [秒]  自定义开机画面（换成自己照片，默认显示 8 秒）
+#   bootlogo-restore    还原长虹原厂开机图
+#   bootlogo-test       不重启，就地预览一次当前开机画面
 # ============================================================
 
 TV="192.168.1.2:5555"
@@ -392,6 +395,80 @@ case "$1" in
     echo "keylayout 挂载数 = $N （应为 2）"
     [ "$N" -ge 2 ] 2>/dev/null && echo "✅ 主页键已恢复" \
       || echo "❌ 没挂上，看 logcat：$ADB -s $TV exec-out sh -c 'logcat -d -s ChSourceHeal'"
+    ;;
+
+  bootlogo)
+    # 自定义开机画面：把任意图片做成开机静态图，替换掉原来那张（原本是长虹 logo）。
+    # 用法： ./65d2p.sh bootlogo ~/Pictures/我家.jpg [显示秒数，默认 8]
+    #
+    # 原理：属性 ro.third.str.logo.path = /chperm/logo/media/STRbootlogo.png
+    #   → 软链到 /data/logo/media4/STRbootlogo.png（可写分区）
+    #   → /system/bin/bootanimation 开机进 STR 模式直接画这张图（已 logcat 验证）
+    #   → 显示时长由 persist.sys.logo.time 控制（persist，重启保留）
+    # 规格：1920x1080、8bit、RGB（不要 alpha，否则可能画不出来）
+    IMG="$2"; SEC="$3"
+    [ -n "$IMG" ] || { echo "用法：./65d2p.sh bootlogo <图片> [秒数]"; exit 1; }
+    [ -f "$IMG" ] || { echo "❌ 找不到图片：$IMG"; exit 1; }
+    [ -n "$SEC" ] || SEC=8
+
+    # 找一个装了 Pillow 的 python
+    PY=""
+    for c in /Users/bob/.workbuddy/binaries/python/envs/default/bin/python3 \
+             /Users/bob/.workbuddy/binaries/python/envs/default/bin/python python3; do
+      if command -v "$c" >/dev/null 2>&1 && "$c" -c "import PIL" >/dev/null 2>&1; then PY="$c"; break; fi
+    done
+    [ -n "$PY" ] || { echo "❌ 找不到带 Pillow 的 python（需要它来转 1920x1080 PNG）"; exit 1; }
+
+    OUT="/tmp/bootlogo_1920x1080.png"
+    echo "▸ 转换图片 → 1920x1080 RGB PNG（等比裁剪铺满）"
+    "$PY" - "$IMG" "$OUT" <<'PYEOF'
+import sys
+from PIL import Image
+src, dst = sys.argv[1], sys.argv[2]
+W, H = 1920, 1080
+im = Image.open(src).convert("RGB")
+print("   原图 %dx%d" % (im.width, im.height))
+sr, tr = im.width / im.height, W / H
+if sr > tr:                       # 偏宽，裁左右
+    nw = int(im.height * tr); x = (im.width - nw) // 2
+    im = im.crop((x, 0, x + nw, im.height))
+else:                             # 偏高，裁上下
+    nh = int(im.width / tr); y = (im.height - nh) // 2
+    im = im.crop((0, y, im.width, y + nh))
+im.resize((W, H), Image.LANCZOS).save(dst, "PNG")
+print("   已生成 %s" % dst)
+PYEOF
+
+    ensure_conn
+    # 原图只备份一次，避免把「上一张自定义图」当成原厂备份
+    tv "[ -f /data/local/tmp/logo_backup/STRbootlogo.orig.png ] \
+        || (mkdir -p /data/local/tmp/logo_backup; \
+            cp /chperm/logo/media/STRbootlogo.png /data/local/tmp/logo_backup/STRbootlogo.orig.png)"
+    $ADB -s "$TV" push "$OUT" /data/logo/media4/STRbootlogo.png 2>&1 | tail -1
+    tv "chmod 644 /data/logo/media4/STRbootlogo.png; \
+        setprop persist.sys.logo.time $SEC"
+    echo "✅ 开机画面已替换，显示 ${SEC} 秒"
+    echo "   重启电视即可看到。原厂图备份在电视 /data/local/tmp/logo_backup/STRbootlogo.orig.png"
+    echo "   还原：./65d2p.sh bootlogo-restore"
+    ;;
+
+  bootlogo-restore)
+    ensure_conn
+    tv "cp /data/local/tmp/logo_backup/STRbootlogo.orig.png /data/logo/media4/STRbootlogo.png \
+        && chmod 644 /data/logo/media4/STRbootlogo.png && echo restored"
+    echo "✅ 已还原长虹原厂开机图（重启生效）"
+    ;;
+
+  bootlogo-test)
+    # 不重启、就地拉起一次 bootanimation，看当前开机图长什么样（几秒后自动停）
+    ensure_conn
+    tv "logcat -c; setprop service.bootanim.exit 0; setprop ctl.start bootanim" >/dev/null 2>&1
+    echo "▸ 已拉起开机画面（电视屏幕会被覆盖几秒）"
+    sleep 5
+    $ADB connect "$TV" >/dev/null 2>&1; sleep 2
+    tv "logcat -d 2>&1 | grep -iE 'strbootlogo|goto STR'" 2>&1
+    tv "setprop service.bootanim.exit 1; setprop ctl.stop bootanim" >/dev/null 2>&1
+    echo "✅ 已停止开机画面，电视恢复正常"
     ;;
 
   *)

@@ -636,6 +636,65 @@ JobScheduler 重启一恢复就判定 overdue，**1~2 分钟内立刻执行**。
 **副作用**：自愈成功后会 `setprop ctl.restart zygote`（软重启 UI，约 30 秒），
 开机后 1~2 分钟内会看到桌面重新加载一次。这是必需的 —— inputflinger 开机时已读过旧键表。
 
+### 3.8 自定义开机画面（把开机图换成自己的照片）★2026-10-18 22:45 实机验证通过
+
+既然 §3.6 已经把开机广告根除，开机那几秒空出来了 —— 可以拿来放自己的照片。
+
+**机制**：这跟广告是**两条独立的路**，互不影响。
+
+```
+ro.third.str.logo.path  = /chperm/logo/media/STRbootlogo.png   ← 静态开机图（我们要换的）
+                            └─ 软链 → /data/logo/media4/STRbootlogo.png（可写分区）
+ro.third.bootvideo.path = /chperm/logo/media/video.ts          ← 开机视频/广告（已清空 + immutable）
+```
+
+`/system/bin/bootanimation` 开机进 **STR 模式**直接画那张 PNG。logcat 实证：
+
+```
+I/BootAnimation: BootAnimation goto STR mode
+I/BootAnimation: start to draw strbootlogo, file: /chperm/logo/media/STRbootlogo.png
+I/BootAnimation: draw strbootlogo end , wait exit
+```
+
+（`strings /system/bin/bootanimation` 里还有 `no default str logo, exit`、
+`persist.sys.logo.time`、`debug.sf.nobootanimation`，逻辑一目了然。）
+
+**素材规格**（从原厂 PNG 的 IHDR 反推）：
+
+| 项 | 值 |
+|---|---|
+| 尺寸 | **1920 × 1080** |
+| 位深 / 色彩 | 8bit、**RGB（color type 2，不要 alpha）** |
+| 格式 | PNG |
+| 显示时长 | `persist.sys.logo.time`（秒，persist 属性，重启保留） |
+
+⚠️ `persist.sys.logo.time` 当初为了灭广告被设成了 `0` —— 不把它调成非 0，
+换了图也只是一闪而过。默认给 8 秒。
+
+**做法（一步到位）**：
+
+```bash
+./65d2p.sh bootlogo ~/Pictures/我家.jpg        # 默认显示 8 秒
+./65d2p.sh bootlogo ~/Pictures/我家.jpg 5      # 自定义秒数
+```
+
+脚本会：等比裁剪铺满到 1920×1080 RGB PNG → push 到 `/data/logo/media4/STRbootlogo.png`
+→ `chmod 644` → `setprop persist.sys.logo.time 8`。
+**重启生效**。原厂图在换图前只备份一次（电视 `/data/local/tmp/logo_backup/STRbootlogo.orig.png`），
+避免把上一张自定义图误当备份。
+
+```bash
+./65d2p.sh bootlogo-restore    # 还原长虹原厂开机图
+./65d2p.sh bootlogo-test       # 不重启，就地拉起一次开机画面看效果（几秒后自动停）
+```
+
+**裁剪策略**：默认 **cover**（等比缩放后居中裁剪，铺满无黑边）。竖构图的照片会裁掉上下，
+想完整保留画面就先在电脑上裁成 16:9 再喂进来。
+
+**注意**：`bootlogo-test` 会把电视屏幕覆盖几秒，属正常；脚本结束时会
+`setprop service.bootanim.exit 1` + `ctl.stop bootanim` 自动恢复。
+若中途 adb 断连导致画面卡住，重连后执行这两条即可恢复。
+
 ## 4. C. 封死 OTA（三层）
 
 ### 层 1 — 光猫网址过滤（网络层，已配置）

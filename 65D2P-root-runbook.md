@@ -695,6 +695,26 @@ I/BootAnimation: draw strbootlogo end , wait exit
 `setprop service.bootanim.exit 1` + `ctl.stop bootanim` 自动恢复。
 若中途 adb 断连导致画面卡住，重连后执行这两条即可恢复。
 
+**传文件的三个坑（都踩过，已在脚本里处理）**
+
+1. **别用 adb 传 3MB 文件**。adbd 只有一个连接位，电视端自愈任务 `Healer` 每 60~120 秒
+   来连一次，会把 Mac 的会话挤掉 —— 表现为传到一半 `failed to read copy response: EOF`
+   + `device offline`。**改走 SimpleSSHD(2222)**，没有这个限制。
+   实测 admin(`u0_a26`) 权限够用：
+   - `/data/logo/media4/` 是 `drwxrwxrwx`（777），能写
+   - `setprop persist.sys.logo.time` 也能设
+   - 但 `/data/local/tmp` 是 `shell:shell 771`，**读不了**（备份要放 `/sdcard`）
+2. **目标文件是 `root:root 644`，admin 只能"删了重建"**，不能直接覆写（scp 会
+   permission denied）。正确顺序：`rm -f` → `scp` → 新文件 owner 变成 u0_a26、644，
+   root 照样能读。
+3. **电视的 sh 极度精简**：没有 `wc`、`stat`、`head`、`tail`、`strings`。
+   数文件大小只能用 `busybox wc -c`（注意它输出带路径，要 `awk '{print $1}'` 取第一列，
+   否则路径里的 `/media4/` 那个 4 会混进数字）。
+   另外它的 `ls -l` 输出**没有 links 列**（不是标准 9 列），`awk '{print $5}'` 会取到日期。
+
+**校验才是重点**：脚本先传、再比字节数，通过才覆盖开机图。直接覆盖的话，
+一旦传一半断掉，`STRbootlogo.png` 就是个截断的 PNG —— 开机黑屏或坏图。
+
 ## 4. C. 封死 OTA（三层）
 
 ### 层 1 — 光猫网址过滤（网络层，已配置）

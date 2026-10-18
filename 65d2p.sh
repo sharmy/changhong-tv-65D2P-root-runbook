@@ -46,6 +46,23 @@ fi
 # 注意：裸 `adb shell` 会要求密码且常见密码全错，必须用 exec-out / -- 
 tv() { $ADB exec-out sh -c "$1" 2>&1; }
 
+# ---- 经 SimpleSSHD(2222) 在电视上执行命令（admin 用户，免密）----
+# 比 adb 稳：adbd 只有一个连接位，电视端自愈任务（Healer）每 60~120 秒来连一次，
+# 会把 Mac 的会话挤掉 —— 传大文件时尤其容易半路断。ssh 没这个限制。
+# admin = u0_a26，能写 /sdcard 和 /data/logo/media4(777)、能 setprop，
+# 但读不了 /data/local/tmp（shell:shell 771）。
+tvssh() {
+  ssh -p "$SSH_PORT" -i "$SSH_KEY" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=8 "admin@${TV%%:*}" "$1" 2>/dev/null
+}
+# 同名文件用 scp 推过去
+tvcpsend() {
+  scp -P "$SSH_PORT" -i "$SSH_KEY" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=10 "$1" "admin@${TV%%:*}:$2" >/dev/null 2>&1
+}
+
 ensure_conn() {
   if ! $ADB devices 2>/dev/null | grep -q "$TV"; then
     echo "▸ 连接 $TV ..."
@@ -435,28 +452,78 @@ if sr > tr:                       # 偏宽，裁左右
 else:                             # 偏高，裁上下
     nh = int(im.width / tr); y = (im.height - nh) // 2
     im = im.crop((0, y, im.width, y + nh))
-im.resize((W, H), Image.LANCZOS).save(dst, "PNG")
-print("   已生成 %s" % dst)
+im.resize((W, H), Image.LANCZOS).save(dst, "PNG", optimize=True)
+print("   已生成 %s（%.1f MB）" % (dst, __import__("os").path.getsize(dst) / 1048576.0))
 PYEOF
 
-    ensure_conn
-    # 原图只备份一次，避免把「上一张自定义图」当成原厂备份
-    tv "[ -f /data/local/tmp/logo_backup/STRbootlogo.orig.png ] \
-        || (mkdir -p /data/local/tmp/logo_backup; \
-            cp /chperm/logo/media/STRbootlogo.png /data/local/tmp/logo_backup/STRbootlogo.orig.png)"
-    $ADB -s "$TV" push "$OUT" /data/logo/media4/STRbootlogo.png 2>&1 | tail -1
-    tv "chmod 644 /data/logo/media4/STRbootlogo.png; \
-        setprop persist.sys.logo.time $SEC"
-    echo "✅ 开机画面已替换，显示 ${SEC} 秒"
-    echo "   重启电视即可看到。原厂图备份在电视 /data/local/tmp/logo_backup/STRbootlogo.orig.png"
+    SIZE=$(wc -c < "$OUT" | tr -dc '0-9')
+    echo "▸ 传输到电视（${SIZE} 字节）"
+    OK=0
+    GOT=0
+
+    # 原厂图只备份一次，避免把「上一张自定义图」当成原厂备份
+    tvssh "mkdir -p /sdcard/logo_backup; \
+           [ -f /sdcard/logo_backup/STRbootlogo.orig.png ] \
+             || cp /chperm/logo/media/STRbootlogo.png /sdcard/logo_backup/STRbootlogo.orig.png" >/dev/null 2>&1
+
+    # 通道 1（首选）：SimpleSSHD —— 不受 adbd 单连接限制
+    if tvssh "echo ok" | grep -q ok; then
+      # 目标文件是 root:root 644，admin 只能「删了重建」，不能直接覆写
+      tvssh "rm -f /data/logo/media4/STRbootlogo.png"
+      if tvcpsend "$OUT" /data/logo/media4/STRbootlogo.png; then
+        GOT=$(tvssh "busybox wc -c /data/logo/media4/STRbootlogo.png" | awk '{print $1}' | tr -dc '0-9')
+        if [ "$GOT" = "$SIZE" ]; then
+          OK=1
+          echo "   通道：SimpleSSHD，字节数校验通过"
+        fi
+      fi
+    fi
+
+    # 通道 2（兜底）：adb。adbd 只有一个连接位，电视端 Healer 每 60~120 秒来抢一次，
+    # 传 3MB 容易半路断 —— 所以先传到临时文件、校验字节数，通过了才覆盖开机图，
+    # 否则会留下一个截断的 PNG，开机就是坏图/黑屏。
+    if [ $OK -eq 0 ]; then
+      echo "   SimpleSSHD 通道未成功（ssh 不通或 scp 失败），改用 adb 兜底"
+      ensure_conn
+      tv "rm -f /data/local/tmp/logo_new.png"
+      $ADB -s "$TV" push "$OUT" /data/local/tmp/logo_new.png >/dev/null 2>&1
+      GOT=$(tv "wc -c < /data/local/tmp/logo_new.png 2>/dev/null" | tr -dc '0-9')
+      if [ "$GOT" = "$SIZE" ]; then
+        tv "cp /data/local/tmp/logo_new.png /data/logo/media4/STRbootlogo.png && \
+            chmod 644 /data/logo/media4/STRbootlogo.png"
+        OK=1
+        echo "   通道：adb，字节数校验通过"
+      fi
+    fi
+
+    [ $OK -eq 1 ] || { echo "❌ 两条通道都失败（期望 $SIZE，实际 ${GOT:-0}），开机图未改动"; exit 1; }
+
+    # 显示时长：admin 也能 setprop（已实测）
+    if ! tvssh "setprop persist.sys.logo.time $SEC" 2>/dev/null; then
+      ensure_conn; tv "setprop persist.sys.logo.time $SEC"
+    fi
+    echo "✅ 开机画面已替换，显示 ${SEC} 秒（重启生效）"
+    echo "   原厂图备份：电视 /sdcard/logo_backup/STRbootlogo.orig.png"
     echo "   还原：./65d2p.sh bootlogo-restore"
     ;;
 
   bootlogo-restore)
-    ensure_conn
-    tv "cp /data/local/tmp/logo_backup/STRbootlogo.orig.png /data/logo/media4/STRbootlogo.png \
-        && chmod 644 /data/logo/media4/STRbootlogo.png && echo restored"
-    echo "✅ 已还原长虹原厂开机图（重启生效）"
+    R=""
+    # 注：电视的 sh 很精简，没有 wc/stat/head/tail/strings；要数大小得用 busybox wc
+    if tvssh "[ -f /sdcard/logo_backup/STRbootlogo.orig.png ] && echo yes" | grep -q yes; then
+      tvssh "rm -f /data/logo/media4/STRbootlogo.png; \
+             cp /sdcard/logo_backup/STRbootlogo.orig.png /data/logo/media4/STRbootlogo.png" \
+             >/dev/null 2>&1
+      R=$(tvssh "busybox wc -c /data/logo/media4/STRbootlogo.png" | awk '{print $1}' | tr -dc '0-9')
+    fi
+    if [ -z "$R" ]; then
+      ensure_conn
+      tv "cp /data/local/tmp/logo_backup/STRbootlogo.orig.png /data/logo/media4/STRbootlogo.png \
+          && chmod 644 /data/logo/media4/STRbootlogo.png" >/dev/null 2>&1
+      R=$(tv "wc -c < /data/logo/media4/STRbootlogo.png" | tr -dc '0-9')
+    fi
+    [ -n "$R" ] && echo "✅ 已还原长虹原厂开机图（$R 字节，重启生效）" \
+                || echo "❌ 还原失败：找不到备份（/sdcard/logo_backup/ 或 /data/local/tmp/logo_backup/）"
     ;;
 
   bootlogo-test)

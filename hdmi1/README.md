@@ -7,15 +7,28 @@
 
 ## 切到 HDMI 后怎么回到安卓系统
 
-**遥控器「主页」键（小房子）直接回**，与「回到系统桌面」图标、以及
-`adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME` 完全等价。
+**先修系统设置（一劳永逸）**：
 
-原理：切 HDMI 时系统只是把 `com.changhong.tvap.atv.activity.AtvMainActivity`（TV 画面窗口）
-拉到前台，**安卓桌面一直在后台没退出**；发 HOME intent 把桌面重新顶到前台即可。
+```bash
+adb exec-out sh -c "settings put secure user_setup_complete 1; settings put global device_provisioned 1"
+# 或：../65d2p.sh fix-home
+```
+
+修完遥控器「主页」键即可正常回到当贝桌面。
+
+**为什么必须修**：本机 `user_setup_complete=0`、`device_provisioned=0`，
+`ActivityManagerService.startHomeActivityLocked()` 认为「用户设置未完成」，
+**静默拒绝启动桌面**，只在 logcat 留一条：
+
+```
+I/WindowManager: Not starting activity because user setup is in progress: Intent { act=MAIN cat=[HOME] ... }
+```
+
+所以按键 HOME 无效，而 `am start -a MAIN -c HOME` 有效（两者走的检查不一样）。
+「回到系统桌面」图标就是发 HOME intent，可作为主页键的备用入口。
 
 ⚠️ 别去信号源菜单里找「Android / 智能系统」——本机 `getInputSourceList()` 实测只有
-ATV / DTV / CVBS / HDMI1 / HDMI2，**没有回系统的信号源项**。
-回系统属于前台 Activity 切换，不是信号源切换，这是两回事。
+ATV / DTV / CVBS / HDMI1 / HDMI2，**没有回系统的信号源项**。回系统是前台 Activity 切换。
 
 ## 原理
 

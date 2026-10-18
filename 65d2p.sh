@@ -15,6 +15,8 @@
 #   pkgs        列出第三方应用 / 已禁用应用
 #   shell <cmd> 在电视上执行任意命令（root 身份）
 #   fix-adb     ADB 失联急救：经 SimpleSSHD(2222免密ssh) 三行配方拉起 root adbd
+#   fix-home    修「切到 HDMI/DTV 后按主页键没反应」（user_setup_complete=0 导致系统拒绝启动桌面）
+#   home-apk    装信号源一键切换 APK（HDMI1/HDMI2/DTV/AV/回系统桌面/信号源菜单）
 # ============================================================
 
 TV="192.168.1.2:5555"
@@ -304,6 +306,36 @@ case "$1" in
     tv "cat /data/logo/config/huanlogo; echo; cat /data/logo/media4/adInfo; echo; $BH ls -la /data/logo/media4/video.ts; $BH lsattr /data/logo/config/huanlogo /data/logo/media4/adInfo /data/logo/media4/video.ts; echo logo.time=\$(getprop persist.sys.logo.time)" | sed 's/^/   /'
     echo "✅ 完成（isOpen=false / adInfo=[] / video.ts=0字节 / 全部 immutable / logo.time=0）"
     echo "   回滚：./65d2p.sh shell \"busybox chattr -i /data/logo/config/huanlogo /data/logo/media4/adInfo /data/logo/media4/video.ts\" 再从 $NAS 拷回"
+    ;;
+
+  fix-home)
+    # ⭐ 修「切到 HDMI/DTV 后按遥控器主页键没反应」
+    #    真因：Settings.Secure.user_setup_complete=0 且 Settings.Global.device_provisioned=0，
+    #    ActivityManagerService.startHomeActivityLocked() 认为"用户设置未完成"，直接拒绝启动桌面，
+    #    只在 logcat 里留一条：Not starting activity because user setup is in progress。
+    #    （所以 am start -a MAIN -c HOME 能回，按键 HOME 回不去 —— 两条路径的检查不一样）
+    ensure_conn
+    echo "▸ 当前值"
+    tv 'echo -n "  secure user_setup_complete = "; settings get secure user_setup_complete; \
+        echo -n "  global device_provisioned   = "; settings get global device_provisioned'
+    echo "▸ 修正为 1"
+    tv 'settings put secure user_setup_complete 1; settings put global device_provisioned 1'
+    echo "▸ 修正后"
+    tv 'echo -n "  secure user_setup_complete = "; settings get secure user_setup_complete; \
+        echo -n "  global device_provisioned   = "; settings get global device_provisioned'
+    echo "✅ 完成。现在切到 HDMI/DTV 后按遥控器「主页」键即可回到当贝桌面"
+    echo "   验证：./65d2p.sh shell \"input keyevent 3\" 然后看前台是否变成 com.dangbei.tvlauncher"
+    ;;
+
+  home-apk)
+    # 信号源一键切换 APK（见 hdmi1/）：HDMI1 / HDMI2 / DTV / AV / 回系统桌面 / 信号源菜单
+    ensure_conn
+    APK="$(dirname "$0")/hdmi1/build/信号源切换-HDMI1.apk"
+    [ -f "$APK" ] || { echo "❌ 找不到 APK：$APK（先跑 hdmi1/build.sh）"; exit 1; }
+    $ADB -s "$TV" install -r "$APK" 2>&1 | tail -2
+    tv "pm grant org.sharmy.chsource android.permission.WRITE_SETTINGS 2>&1; true" >/dev/null 2>&1
+    echo "✅ 已安装：桌面会多出 6 个图标（机顶盒 HDMI1 / HDMI2 / DTV / AV / 回到系统桌面 / 信号源菜单）"
+    echo "   注：这只是快捷入口；主页键要根治请跑 ./65d2p.sh fix-home"
     ;;
 
   *)

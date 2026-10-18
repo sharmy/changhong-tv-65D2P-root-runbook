@@ -9,6 +9,8 @@
     <!-- TVServiceHandler 切源时会写 Settings.System，缺这个权限会被抛 SecurityException -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <!-- 回到系统时要杀掉 TV 播放器进程以释放底层视频资源 -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
     <application
         android:label="信号源"
@@ -92,7 +94,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <meta-data android:name="source" android:value="__HOME__" />
+            <meta-data android:name="source" android:value="__SYS__" />
         </activity-alias>
 
         <!-- 直接弹出系统原生「信号源」菜单 -->

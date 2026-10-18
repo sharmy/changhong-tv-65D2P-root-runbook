@@ -29,6 +29,8 @@ public class SwitchActivity extends Activity {
     public static final String META_SOURCE = "source";
 
     private static final String C_TV_MANAGER = "com.changhong.tvos.common.TVManager";
+    /** 持有 TV 播放资源的系统播放器进程，切源后由它显示 HDMI/DTV 画面 */
+    private static final String TV_PLAYER_PKG = "com.changhong.tvap.atv.activity";
     private static final String C_ITV_PLAYER = "com.changhong.tvos.common.ITVPlayer";
     private static final String C_ISRC_MGR   = "com.changhong.tvos.common.ISourceManager";
     private static final String C_ENUM_SRC   = "com.changhong.tvos.model.EnumInputSource";
@@ -62,7 +64,9 @@ public class SwitchActivity extends Activity {
         if ("__MENU__".equals(src)) {
             msg = openSourceMenu();
         } else if ("__HOME__".equals(src)) {
-            msg = goHome();
+            msg = goHome(false);
+        } else if ("__SYS__".equals(src)) {
+            msg = goHome(true);
         } else {
             msg = switchTo(getApplicationContext(), src);
         }
@@ -78,24 +82,71 @@ public class SwitchActivity extends Activity {
     }
 
     /**
-     * 从 HDMI / DTV 回到安卓系统桌面（等价于遥控器「主页」键）。
+     * 从 HDMI / DTV 回到安卓系统桌面。
      *
-     * 说明：切到 HDMI 时系统会拉起 com.changhong.tvap.atv.activity.AtvMainActivity
-     * 占住前台显示 TV 画面；发 HOME intent 把桌面（当前是当贝桌面）重新顶到前台，
-     * AtvMainActivity 退到后台，画面就回到安卓系统了。
+     * 关键（实测踩坑）：只发 HOME intent 是不够的 —— 桌面确实会被调到前台
+     * （mCurrentFocus 变成 com.dangbei.tvlauncher），但底层视频层仍在输出 HDMI，
+     * 画面被盖住，看起来就像"主页键没反应"。
+     * 必须先 ITVPlayer.stop() 让 Tvmain 停掉视频输出，再拉起桌面。
+     *
+     * @param stopVideo true=先 stop() 停视频层（推荐），false=只发 HOME（对照用）
      */
-    private String goHome() {
+    private String goHome(boolean stopVideo) {
+        StringBuilder d = new StringBuilder();
+        String cur = "";
+        if (stopVideo) {
+            // (a) TVOS 侧：我们自己这个 client 未必持有资源，stop() 常常返回 false，仅尽力而为
+            try {
+                Object tv = Class.forName(C_TV_MANAGER)
+                        .getMethod("getInstance", Context.class)
+                        .invoke(null, getApplicationContext());
+                Object player = tv.getClass().getMethod("getATVPlayer").invoke(tv);
+                Object rc = Class.forName(C_ITV_PLAYER).getMethod("stop").invoke(player);
+                d.append("stop=").append(rc).append(" ");
+                try {
+                    cur = pretty(currentSource(tv));
+                } catch (Throwable ignore) {
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "ITVPlayer.stop 失败", t);
+                d.append("stop:").append(shortErr(t)).append(" ");
+            }
+        }
+
+        // (b) 先把桌面拉到前台 —— 这样 TV 播放器（AtvMainActivity）变成「后台进程」，
+        //     下一步才有权杀它（killBackgroundProcesses 只杀后台进程）
         try {
             android.content.Intent home = new android.content.Intent(android.content.Intent.ACTION_MAIN);
             home.addCategory(android.content.Intent.CATEGORY_HOME);
             home.setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
                     | android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             startActivity(home);
-            return "已回到系统桌面";
+            d.append("home:ok ");
         } catch (Throwable t) {
-            Log.e(TAG, "goHome failed", t);
-            return "回到桌面失败：" + shortErr(t);
+            Log.e(TAG, "HOME intent 失败", t);
+            d.append("home:").append(shortErr(t)).append(" ");
         }
+
+        // (c) 关键一步：杀掉 TV 播放器进程。
+        //     它持有 TVOS 的播放资源（checkClientResource 就是按 pid 判的），
+        //     只有它死了，TVServiceHandler 才会 onClientDied → 释放资源 → 底层停掉 HDMI 输出，
+        //     安卓桌面的画面才露得出来。
+        //     延时一点，等 ActivityManager 真的把它置为后台。
+        getWindow().getDecorView().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    android.app.ActivityManager am =
+                            (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                    am.killBackgroundProcesses(TV_PLAYER_PKG);
+                    Log.i(TAG, "killBackgroundProcesses(" + TV_PLAYER_PKG + ") 已调用");
+                } catch (Throwable t) {
+                    Log.e(TAG, "killBackgroundProcesses 失败", t);
+                }
+            }
+        }, 600);
+
+        return "已回到系统桌面 " + d + (cur.length() > 0 ? "源=" + cur : "");
     }
 
     /** 弹出系统原生「信号源」菜单（SourceMenuService 的 menuSource 指令） */

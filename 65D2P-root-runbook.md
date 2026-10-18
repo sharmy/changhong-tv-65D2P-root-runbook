@@ -395,24 +395,74 @@ Menu  -> 已打开信号源菜单
 Hdmi1 -> 已切换到 HDMI1
 ```
 
-### 3.7.1 切到 HDMI 后怎么回到安卓系统
+### 3.7.1 切到 HDMI 后主页键没反应 ★★★ 真因：user_setup_complete=0
 
-**结论：遥控器「主页」键（小房子）即可**，与下面这条命令/图标完全等价：
+**现象**：切到 HDMI/DTV 后按遥控器「主页」键毫无反应，只能看到 TV 画面；
+但用 `adb shell am start -a android.intent.action.MAIN -c android.intent.category.HOME`
+却能正常回到当贝桌面。**两条路结果不一样**，这是破案的关键。
 
-```bash
-adb exec-out sh -c "am start -a android.intent.action.MAIN -c android.intent.category.HOME"
+**真因**（2026-10-18 实测定位，logcat 铁证）：
+
+```
+I/WindowManager: Not starting activity because user setup is in progress:
+Intent { act=android.intent.action.MAIN cat=[android.intent.category.HOME] flg=0x10200000 }
 ```
 
-**原理**（这决定了为什么"主页"能回去，而其他键不行）：
-切到 HDMI 时，系统只是把 `com.changhong.tvap.atv.activity.AtvMainActivity`
-（TV 画面播放窗口）拉到前台，**安卓桌面一直在后台没退出**。发 HOME intent
-就是把桌面（当贝桌面）重新顶到前台，AtvMainActivity 退到后台，画面即回到安卓系统。
+系统**认为「用户设置未完成」**，`ActivityManagerService.startHomeActivityLocked()`
+直接拒绝启动桌面 —— 而且**静默失败**，不打异常、不弹提示，所以看起来就像"按键坏了"。
 
-所以：
+对应两个设置项（本机出厂/被改后就是 0）：
+
+| 设置项 | 原值 | 正确值 |
+|---|---|---|
+| `Settings.Secure.user_setup_complete` | `0` | `1` |
+| `Settings.Global.device_provisioned` | `0` | `1` |
+
+**修复（一行命令，持久生效）**：
+
+```bash
+./65d2p.sh fix-home
+# 等价于：
+adb exec-out sh -c "settings put secure user_setup_complete 1; settings put global device_provisioned 1"
+```
+
+**修复后实测（4 轮回归全部通过）**：
+
+| 进源 | 按主页键后前台 | 截图大小 |
+|---|---|---|
+| HDMI1 | com.dangbei.tvlauncher | 18KB → 757KB |
+| HDMI2 | com.dangbei.tvlauncher | → 583KB |
+| DTV | com.dangbei.tvlauncher | → 583KB |
+| HDMI1 | com.dangbei.tvlauncher | → 583KB |
+
+日志同时变成正常：`START u0 {act=MAIN cat=[HOME] cmp=com.dangbei.tvlauncher/...} from uid 1000`。
+
+**为什么 `am start` 能绕过**：`am start` 走普通 `startActivity`，不做
+`startHomeActivityLocked` 的「用户设置是否完成」检查；而按键走
+`launchHomeFromHotKey → startHomeActivityLocked`，会检查。这就是两者不一致的原因。
+
+**附带结论**：
 - **信号源菜单里没有「Android / 智能系统」这一项**（`getInputSourceList()` 实测只有
   ATV/DTV/CVBS/HDMI1/HDMI2），**别去信号源菜单里找回去的入口**——找不到。
-- 回到系统的入口只有**前台 Activity 切换**（主页键 / HOME intent），不是信号源切换。
-- APK 里的「回到系统桌面」图标就是发这个 HOME intent，方便遥控器不在手边时用。
+- 回到系统是**前台 Activity 切换**，不是信号源切换；TV 画面窗口是
+  `com.changhong.tvap.atv.activity/.AtvMainActivity`。
+- APK 里的「回到系统桌面」图标（发 HOME intent）可作为主页键的备用入口。
+
+**排查过程中被排除的错误方向（别再走一遍）**：
+- ❌ 「HDMI 视频层置顶盖住了安卓 UI」——`dumpsys SurfaceFlinger` 里当贝桌面图层
+  `isOpaque=1`、全屏、z=21005，并不存在遮挡；截图能直接拍到桌面。
+- ❌ 「杀掉 TV 播放器进程 `com.changhong.tvap.atv.activity`」——杀了只会变成
+  "无信号请检查输入"黑屏，桌面依旧不出来（因为问题在 HOME 启动被拒，不是资源占用）。
+- ❌ `ITVPlayer.stop()` / `muteVideo()`——TVServiceHandler 每个方法第一行都是
+  `checkClientResource(调用方pid)`，第三方 app 不持有资源，直接 return（`stop()` 恒为 false）。
+- ❌ `startInputSource(E_INPUT_SOURCE_NONE / OTHER)`——均返回 false，本机不支持。
+
+**调试技巧（省很多来回）**：`screencap` 能直接反映真实屏幕，截图大小还能当快速判据
+（当贝桌面约 580~760KB，TV 黑屏"无信号"约 18~28KB），全程不用人盯着电视看：
+
+```bash
+adb exec-out screencap -p > /tmp/s.png && stat -f%z /tmp/s.png
+```
 
 ## 4. C. 封死 OTA（三层）
 

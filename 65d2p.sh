@@ -47,8 +47,12 @@ fi
 tv() { $ADB exec-out sh -c "$1" 2>&1; }
 
 # ---- 经 SimpleSSHD(2222) 在电视上执行命令（admin 用户，免密）----
-# 比 adb 稳：adbd 只有一个连接位，电视端自愈任务（Healer）每 60~120 秒来连一次，
-# 会把 Mac 的会话挤掉 —— 传大文件时尤其容易半路断。ssh 没这个限制。
+# 传大文件用 ssh 更稳：adbd 只有一个连接位，电视端自愈（Healer）出问题时也会来抢，
+# 容易把 Mac 的会话挤掉（传 3MB 图片曾半路 EOF）。ssh 没这个限制。
+# ⚠ SimpleSSHD 不是常驻的，电视重启后要在电视上手动打开一次，否则 2222 拒连。
+# ⚠ ssh 里跑 am 必须加 --user 0，否则报
+#     SecurityException: startActivity asks to run as user -2 but is calling from user 0
+#     （adb shell 是 shell 用户，没这问题；admin=u0_a26 有）
 # admin = u0_a26，能写 /sdcard 和 /data/logo/media4(777)、能 setprop，
 # 但读不了 /data/local/tmp（shell:shell 771）。
 tvssh() {

@@ -7,8 +7,10 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.InputStream;
 import java.io.OutputStream;
 
@@ -88,14 +90,23 @@ public final class Healer {
         }
     }
 
-    /** 排下一次（一次性任务跑完就消失，必须自己续上，否则重启后就没人拉了） */
-    private static void scheduleNext(Context ctx) {
+    /**
+     * 排下一次（一次性任务跑完就消失，必须自己续上，否则重启后就没人拉了）。
+     *
+     * 间隔分两档：
+     *   - 没挂上：60~120s 高频重试，尽快把主页键救回来
+     *   - 已挂上：4~6min 低频巡检。bind mount 只有重启才会丢，没必要每秒盯着；
+     *     降频后一小时约 12 次连接（原来 30~60 次），即便哪里再漏 fd 也撑得住。
+     */
+    private static void scheduleNext(Context ctx, boolean ok) {
         try {
+            long min = ok ? 4 * 60 * 1000L : 60 * 1000L;
+            long max = ok ? 6 * 60 * 1000L : 120 * 1000L;
             JobScheduler js = (JobScheduler) ctx.getSystemService(Context.JOB_SCHEDULER_SERVICE);
             ComponentName cn = new ComponentName(ctx, HealJobService.class);
             JobInfo next = new JobInfo.Builder(JOB_NEXT, cn)
-                    .setMinimumLatency(60 * 1000L)
-                    .setOverrideDeadline(120 * 1000L)
+                    .setMinimumLatency(min)
+                    .setOverrideDeadline(max)
                     .setPersisted(true)
                     .build();
             js.schedule(next);
@@ -106,31 +117,38 @@ public final class Healer {
 
     /** 执行一次自愈（同步、含等待，请在后台线程调用） */
     static void run(Context ctx, String trigger) {
+        boolean ok = false;
         try {
-            doRun(ctx, trigger);
+            ok = doRun(ctx, trigger);
         } finally {
             // 一次性任务跑完就没了，必须续上下一次，否则下一次重启没人拉起
-            scheduleNext(ctx);
+            scheduleNext(ctx, ok);
         }
     }
 
-    private static void doRun(Context ctx, String trigger) {
+    /** @return true 表示 keylayout 已经挂好（或本来就挂好了） */
+    private static boolean doRun(Context ctx, String trigger) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         long now = System.currentTimeMillis();
         long last = sp.getLong(K_LAST, 0L);
         if (now - last < MIN_GAP_MS) {
             Log.i(TAG, "[" + trigger + "] 距离上次仅 " + ((now - last) / 1000) + "s，节流跳过");
-            return;
+            return true;      // 不是失败，别把间隔缩回高频
         }
         sp.edit().putLong(K_LAST, now).commit();
 
-        // 1) 先看是不是已经挂好了（adbd 正常时这一步就结束）
-        String probe = MiniAdb.shell(H, P, "grep -c keylayout /proc/mounts", 5000);
-        int n = num(probe);
-        Log.i(TAG, "[" + trigger + "] 探测挂载数=" + n + "  原始=" + probe.trim());
+        // 1) 先看是不是已经挂好了 —— 直接读 /proc/mounts，不需要 root、不需要 adb。
+        //    这样"已挂载"这个常态下完全不产生连接，只有真掉了才去连 adbd。
+        int n = localMounts();
+        if (n < 0) {
+            String probe = MiniAdb.shell(H, P, "grep -c keylayout /proc/mounts", 5000);
+            n = num(probe);
+            Log.i(TAG, "[" + trigger + "] 本地读不到，退回 adb 探测 => " + probe.trim());
+        }
+        Log.i(TAG, "[" + trigger + "] 挂载数=" + n + "  fd=" + fdCount());
         if (n >= 2) {
             Log.i(TAG, "已挂载，跳过");
-            return;
+            return true;
         }
 
         // 2) 准备修复文件与脚本
@@ -147,11 +165,18 @@ public final class Healer {
                 // inputflinger 开机时已读过旧键表，必须软重启一次才生效
                 MiniAdb.shell(H, P, "setprop ctl.restart zygote", 6000);
                 Log.i(TAG, "keylayout 已挂载，已触发 zygote 重启（键表将重新加载）");
-                return;
+                return true;
             }
-            toggleAdb();
+            // 别每次都重启 adbd —— 那要 5 秒，8 轮就是 40 秒，还会把电脑上
+            // 正在连着的 adb 踢掉。隔一轮重启一次，够用了。
+            if (i % 2 == 0) {
+                toggleAdb();
+            } else {
+                sleep(1500);
+            }
         }
-        Log.e(TAG, "自愈失败：8 次都没挂上");
+        Log.e(TAG, "自愈失败：8 次都没挂上  fd=" + fdCount());
+        return false;
     }
 
     /** 重启 root adbd：三行配方（长虹 init 补丁 + service.adb.root） */
@@ -180,36 +205,94 @@ public final class Healer {
     }
 
     private static void exec(String... cmd) {
+        Process p = null;
         try {
-            Process p = Runtime.getRuntime().exec(cmd);
+            p = Runtime.getRuntime().exec(cmd);
+            // ⚠ Process 的 stdin/stdout/stderr 是三个 pipe fd，不关就一直占着。
+            //   和 MiniAdb 的 socket 是同一个坑：app 的 fd 上限 1024，
+            //   这里一次 toggleAdb 就是 3 个进程 × 3 个 fd，几小时就能耗尽。
+            try { p.getOutputStream().close(); } catch (Throwable ignore) { }
+            try { p.getInputStream().close(); } catch (Throwable ignore) { }
+            try { p.getErrorStream().close(); } catch (Throwable ignore) { }
             p.waitFor();
         } catch (Throwable t) {
             Log.w(TAG, "exec 失败 " + cmd[0], t);
+        } finally {
+            if (p != null) {
+                try { p.destroy(); } catch (Throwable ignore) { }
+            }
+        }
+    }
+
+    /**
+     * 本地读 /proc/mounts 数 keylayout 的挂载条目。
+     * /proc/mounts 是全局可读的，判断"修好了没有"压根用不着 root ——
+     * 之前每次都为此开一条 adb 连接，纯属浪费（还白白消耗 fd）。
+     * @return 挂载条数，读不了返回 -1
+     */
+    private static int localMounts() {
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new FileReader("/proc/mounts"), 4096);
+            int c = 0;
+            String line;
+            while ((line = r.readLine()) != null) {
+                if (line.contains("keylayout")) {
+                    c++;
+                }
+            }
+            return c;
+        } catch (Throwable t) {
+            Log.w(TAG, "读 /proc/mounts 失败", t);
+            return -1;
+        } finally {
+            if (r != null) {
+                try { r.close(); } catch (Throwable ignore) { }
+            }
+        }
+    }
+
+    /** 当前进程已占用的 fd 数，打进日志，方便日后一眼看出是不是又泄漏了 */
+    private static int fdCount() {
+        try {
+            String[] l = new File("/proc/self/fd").list();
+            return (l == null) ? -1 : l.length;
+        } catch (Throwable t) {
+            return -1;
         }
     }
 
     private static void copyAsset(Context ctx, String name) {
+        InputStream in = null;
+        OutputStream out = null;
         try {
-            InputStream in = ctx.getAssets().open(name);
+            in = ctx.getAssets().open(name);
             File f = new File(ctx.getFilesDir(), name);
-            OutputStream out = new FileOutputStream(f);
+            out = new FileOutputStream(f);
             byte[] buf = new byte[8192];
             int len;
             while ((len = in.read(buf)) > 0) {
                 out.write(buf, 0, len);
             }
-            out.close();
-            in.close();
-            exec("/system/bin/chmod", "644", f.getAbsolutePath());   // 让 root 能读
         } catch (Throwable t) {
             Log.e(TAG, "copyAsset 失败 " + name, t);
+        } finally {
+            if (in != null) {
+                try { in.close(); } catch (Throwable ignore) { }
+            }
+            if (out != null) {
+                try { out.close(); } catch (Throwable ignore) { }
+            }
         }
+        // 让 root 能读（脚本里还要把它 cp 到 /data/chkeys）
+        exec("/system/bin/chmod", "644", new File(ctx.getFilesDir(), name).getAbsolutePath());
     }
 
     private static File writeScript(Context ctx) {
         File f = new File(ctx.getFilesDir(), "ch_fixkeys.sh");
+        FileOutputStream o = null;
         try {
-            FileOutputStream o = new FileOutputStream(f);
+            o = new FileOutputStream(f);
             String dir = ctx.getFilesDir().getAbsolutePath();
             String s = "#!/system/bin/sh\n"
                     + "mkdir -p /data/chkeys\n"
@@ -222,11 +305,14 @@ public final class Healer {
                     + "mount -o bind /data/chkeys/" + B + " /system/usr/keylayout/" + B + "\n"
                     + "echo MOUNTS=$(grep -c keylayout /proc/mounts)\n";
             o.write(s.getBytes("UTF-8"));
-            o.close();
-            exec("/system/bin/chmod", "755", f.getAbsolutePath());
         } catch (Throwable t) {
             Log.e(TAG, "写脚本失败", t);
+        } finally {
+            if (o != null) {
+                try { o.close(); } catch (Throwable ignore) { }
+            }
         }
+        exec("/system/bin/chmod", "755", f.getAbsolutePath());
         return f;
     }
 

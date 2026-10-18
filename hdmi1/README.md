@@ -144,16 +144,25 @@ APK 里的「回到系统桌面」图标（`__SYS__`）仍保留，作为不依�
 
 | JOB | 类型 | 作用 |
 |---|---|---|
-| 6511 | 一次性 + 自续期，60~120s | 主力。deadline 是绝对时刻，开几小时后早已过期，重启一恢复就 overdue 立刻执行 |
+| 6511 | 一次性 + 自续期 | 主力。deadline 是绝对时刻，开几小时后早已过期，重启一恢复就 overdue 立刻执行。间隔分两档：已挂载 4~6min、没挂上 60~120s |
 | 6510 | 周期 15 分钟 | 兜底（API 22 最小周期） |
+
+**探测不走 adb**：判断"挂上没有"直接读 `/proc/mounts`（全局可读，不用 root），
+所以常态下**零 adb 连接**，只有真掉了才去连 adbd。日志里带 `fd=N`，正常约 29。
 
 顺带监听 `BOOT_COMPLETED` / `CONNECTIVITY_CHANGE` / `USER_PRESENT` / `SCREEN_ON` 等广播做
 "早起"触发 —— 前提是包名**不在** `/chperm/preapp/killbackground` 里（在电视管家开
 「自动启动 + 后台运行」即可），**而且改完要重启一次**才生效：这份名单是 system_server
 开机时读一次的，不重启的话所有静态广播都送不到（容易误判成"被系统拦了"）。
 
-⚠️ 两个坑：`JobService` 的 `android:exported` **必须是 `true`**（写成 false 会一直 READY
-但永不执行，且不报错）；`adbd` 同时只认一个连接，电脑连着时电视端必然超时，所以带 8 次重试。
+⚠️ 三个坑：
+
+1. `JobService` 的 `android:exported` **必须是 `true`**（写成 false 会一直 READY 但永不执行，且不报错）。
+2. `adbd` 同时只认一个连接，电脑连着时电视端必然超时，所以带 8 次重试。
+3. **所有流都必须关**（`MiniAdb` 的 `out`/`in`/`socket`，`Runtime.exec` 出来的
+   `Process` 的 stdin/stdout/stderr，文件流）。漏一个就是几小时内把 1024 个 fd 耗尽 ——
+   之后连 `setprop` 都 fork 不出来，自愈彻底瘫掉且**自己救不回来**。2026-10-18 踩过，
+   表现是"主页键用几小时后又不行了"。
 
 ⚠️ 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 给「信号源」打开，**然后重启电视一次**。
 它写的是 `/chperm/preapp/{AppWhiteList,keeprunning,popwindowwhitelist}`，并把包名从

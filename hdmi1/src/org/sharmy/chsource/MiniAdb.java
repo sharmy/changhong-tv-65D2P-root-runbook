@@ -32,12 +32,14 @@ public final class MiniAdb {
 
     public static String shell(String host, int port, String cmd, int timeoutMs) {
         Socket s = null;
+        DataOutputStream out = null;
+        DataInputStream in = null;
         try {
             s = new Socket();
             s.connect(new InetSocketAddress(host, port), timeoutMs);
             s.setSoTimeout(timeoutMs);
-            DataOutputStream out = new DataOutputStream(s.getOutputStream());
-            DataInputStream in = new DataInputStream(s.getInputStream());
+            out = new DataOutputStream(s.getOutputStream());
+            in = new DataInputStream(s.getInputStream());
 
             send(out, CNXN, 0x01000000, 4096, "host::\0");
             read(in);                                   // 服务端的 CNXN
@@ -60,11 +62,17 @@ public final class MiniAdb {
         } catch (Throwable t) {
             return "ERR: " + t;
         } finally {
+            // ⚠ 三个都得关。app 的 fd 上限只有 1024，本方法每 60~120 秒被调用一次，
+            //   漏一个就是几小时内把 fd 耗尽 —— 之后连 Runtime.exec 都会报
+            //   "Too many open files"，自愈彻底失效（踩过）。
+            if (out != null) {
+                try { out.close(); } catch (Throwable ignore) { }
+            }
+            if (in != null) {
+                try { in.close(); } catch (Throwable ignore) { }
+            }
             if (s != null) {
-                try {
-                    s.close();
-                } catch (Throwable ignore) {
-                }
+                try { s.close(); } catch (Throwable ignore) { }
             }
         }
     }

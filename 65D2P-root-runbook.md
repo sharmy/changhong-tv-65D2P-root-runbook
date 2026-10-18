@@ -636,6 +636,67 @@ JobScheduler 重启一恢复就判定 overdue，**1~2 分钟内立刻执行**。
 **副作用**：自愈成功后会 `setprop ctl.restart zygote`（软重启 UI，约 30 秒），
 开机后 1~2 分钟内会看到桌面重新加载一次。这是必需的 —— inputflinger 开机时已读过旧键表。
 
+### 3.7.4 自愈跑几小时就失效：fd 泄漏（2026-10-18 23:30 定位并修复）
+
+**现象**：上电视重启验证通过才几小时，主页键又不行了。
+
+```
+$ adb shell grep -c keylayout /proc/mounts
+0
+E/ChSourceHeal: 自愈失败：8 次都没挂上
+W/ChSourceHeal: exec 失败 /system/bin/setprop
+    Caused by: java.io.IOException: Too many open files
+        at java.lang.ProcessManager.exec(Native Method)
+        at org.sharmy.chsource.Healer.toggleAdb(Healer.java:161)
+```
+
+注意最后一行才是真因：**不是连不上 adbd，是 fd 用光了** —— 连 `setprop` 都 fork 不出来，
+自愈彻底瘫掉，而且**自己救不回来**（任何补救都要 exec）。
+
+**根因**：两个地方只关了"外壳"，没关里面的流。
+
+| 位置 | 漏了什么 |
+|---|---|
+| `MiniAdb.shell()` | `finally` 里只 `s.close()`，`DataOutputStream` / `DataInputStream` 各自的 fd 没关 |
+| `Healer.exec()` | `Runtime.getRuntime().exec()` 出来的 `Process`，三个 pipe（stdin/stdout/stderr）全没关 |
+
+app 进程的 fd 上限是 **1024**。原先每 60~120 秒一轮、每轮最多 8 次连接 + 3 次 `setprop`
+（`toggleAdb`），一小时就是几百个 fd —— **几小时必然耗尽**。
+
+**修复（4 处）**
+
+1. `MiniAdb`：`out` / `in` / `s` **三个都关**，且 `out`、`in` 要提到 `try` 外声明。
+2. `Healer.exec()`：`p.getOutputStream()/getInputStream()/getErrorStream()` 全部 `close()`，
+   再 `waitFor()`，最后 `p.destroy()`。
+3. `copyAsset()` / `writeScript()`：文件流改 `try/finally`。
+4. **探测不再走 adb**：判断"挂上了没有"直接读 `/proc/mounts`（全局可读，**不需要 root**）。
+   常态（已挂载）**零 adb 连接**，只有真掉了才去连 adbd。
+
+**顺带降频**
+
+- 已挂载 → 下次巡检 4~6 分钟（本地读，成本≈0）；未挂载 → 60~120 秒高频重试。
+- `toggleAdb()` 改成**隔一轮**才重启 adbd（原来 8 次就是 40 秒，还会把电脑上的 adb 踢掉）。
+- 每次日志带 `fd=N`，一眼能看出有没有再泄漏（正常值 ~30）。
+
+**验证（2026-10-18 23:4x）**
+
+| 步骤 | 结果 |
+|---|---|
+| 手工 `umount` 掉两个 bind mount（模拟重启后状态） | `MOUNTS=0` |
+| `adb disconnect`（把连接位让出来）后等 170 秒 | `MOUNTS=2` ✅ 电视自己接回来了 |
+| `sendevent /dev/input/event0 1 91` | `START u0 {act=MAIN cat=[HOME] cmp=com.dangbei.tvlauncher/...}` ✅ |
+| `fd` | 29（健康） |
+
+**顺带两个坑**
+
+- 用 `ssh`(2222) 跑 `am` 必须加 **`--user 0`**，否则：
+  `SecurityException: startActivity asks to run as user -2 but is calling from user 0`。
+  （`adb shell` 是 shell 用户，无此问题；`admin=u0_a26` 会撞上。）
+- **SimpleSSHD 不是常驻的**，电视重启后要在电视上手动打开一次，否则 2222 直接
+  `Connection refused`。
+- `adb install -r` 之后系统会 `Force stopping ... pkg changed`，进程被杀，
+  `MY_PACKAGE_REPLACED` 不会送达 → **装完必须手动启动一次 app**，让它把 Job 重新注册上。
+
 ### 3.8 自定义开机画面（把开机图换成自己的照片）★2026-10-18 22:45 实机验证通过
 
 既然 §3.6 已经把开机广告根除，开机那几秒空出来了 —— 可以拿来放自己的照片。
@@ -697,9 +758,10 @@ I/BootAnimation: draw strbootlogo end , wait exit
 
 **传文件的三个坑（都踩过，已在脚本里处理）**
 
-1. **别用 adb 传 3MB 文件**。adbd 只有一个连接位，电视端自愈任务 `Healer` 每 60~120 秒
-   来连一次，会把 Mac 的会话挤掉 —— 表现为传到一半 `failed to read copy response: EOF`
+1. **别用 adb 传 3MB 文件**。adbd 只有一个连接位，电视端自愈任务 `Healer` 一旦在重试
+   就会来抢，把 Mac 的会话挤掉 —— 表现为传到一半 `failed to read copy response: EOF`
    + `device offline`。**改走 SimpleSSHD(2222)**，没有这个限制。
+   （§3.7.4 之后 Healer 常态已不连 adbd，只在挂载真掉了才连，冲突概率小多了。）
    实测 admin(`u0_a26`) 权限够用：
    - `/data/logo/media4/` 是 `drwxrwxrwx`（777），能写
    - `setprop persist.sys.logo.time` 也能设

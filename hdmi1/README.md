@@ -48,9 +48,19 @@ TVManager.getInstance(ctx)      // com.changhong.tvos.common.TVManager
 
 ```
 hdmi1/
-├── AndroidManifest.xml                       # 1 个 Activity + 6 个 activity-alias
-├── src/org/sharmy/chsource/SwitchActivity.java
+├── AndroidManifest.xml                       # 1 个 Activity + 6 个 activity-alias + 2 service + 1 receiver
+├── src/org/sharmy/chsource/
+│   ├── SwitchActivity.java                   # 反射 TVOS SDK 切源 / 回桌面 / 调试指令
+│   ├── HomeUtil.java                         # 统一的"回桌面"实现（Activity 与 Service 共用）
+│   ├── MiniAdb.java                          # 极简 adb 协议客户端（连本机 root adbd）
+│   ├── Healer.java                           # 自愈逻辑 + JobScheduler 注册
+│   ├── HealJobService.java                   # JobService 执行体
+│   ├── SelfHealService.java                  # IntentService 执行体（广播触发时用）
+│   ├── BootReceiver.java                     # 多广播触发（BOOT/USER_PRESENT/SCREEN_ON/网络…）
+│   └── …
+├── assets/Vendor_*.kl                        # 修复版 keylayout（打包进 APK）
 ├── res/drawable-nodpi/ic_*.png               # 图标（Pillow 生成）
+├── keylayout/                                # 同上的副本 + 原厂备份 + fixkeys.tv.sh
 ├── build.sh                                  # 手工构建脚本（不用 Gradle）
 └── build/信号源切换-HDMI1.apk                # 产物
 ```
@@ -58,6 +68,16 @@ hdmi1/
 一个 Activity + 多个 `activity-alias`，每个 alias 用
 `<meta-data android:name="source" android:value="E_INPUT_SOURCE_HDMI">`
 声明目标源 → 一份代码出多个桌面图标。
+
+调试指令（`am start -n org.sharmy.chsource/.Home --es source XXX`）：
+
+| source | 作用 |
+|---|---|
+| `__LIST__` | 列出本机支持的信号源与当前源 |
+| `__MENU__` | 弹系统原生信号源菜单 |
+| `__HOME__` / `__SYS__` | 回安卓桌面 |
+| `__HEAL__` | 立即触发一次自愈（不用重启也能验证） |
+| `__ADB__` | 用 `--es cmd "id"` 验证 app 能否拿到 root shell |
 
 ## 构建
 
@@ -106,11 +126,37 @@ adb exec-out sh -c 'logcat -d | /system/bin/busybox grep I/ChSourceSwitch'
    解析成 `keyCode=0` 被丢弃）→ `../../65d2p.sh fix-keys`
 
 第二项靠 bind mount 覆盖 `/system/usr/keylayout/`（只读，remount 被拒），
-**电视重启后失效，需重跑**。细节见 runbook §3.7.1 / §3.7.2。
+**重启即失效**。细节见 runbook §3.7.1 / §3.7.2。
 
 `keylayout/` 目录就是这份修复的版本，`Vendor_0001_Product_0001.kl.orig` 是原厂原件备份。
 
 APK 里的「回到系统桌面」图标（`__SYS__`）仍保留，作为不依赖按键的备用入口。
+
+### 重启后自动重挂（已内置，2026-10-18 真重启验证通过）
+
+不再需要电脑重跑 `fix-keys`：APK 自己会在开机后 1~2 分钟内把 keylayout 重新挂上。
+
+做法：本机 adbd 以 root 运行且 `ro.adb.secure=0`，app 直接走 `127.0.0.1:5555`
+用 adb 协议拿 root shell（`MiniAdb.java`，约 120 行的极简 adb 客户端），
+再 `mount -o bind` + `setprop ctl.restart zygote`，全程电视内部完成。
+
+触发靠 JobScheduler（`Healer` / `HealJobService`）：
+
+| JOB | 类型 | 作用 |
+|---|---|---|
+| 6511 | 一次性 + 自续期，60~120s | 主力。deadline 是绝对时刻，开几小时后早已过期，重启一恢复就 overdue 立刻执行 |
+| 6510 | 周期 15 分钟 | 兜底（API 22 最小周期） |
+
+顺带监听 `CONNECTIVITY_CHANGE` 等广播做"早起"触发（实测系统发的能收到）。
+
+⚠️ 两个坑：`JobService` 的 `android:exported` **必须是 `true`**（写成 false 会一直 READY
+但永不执行，且不报错）；`adbd` 同时只认一个连接，电脑连着时电视端必然超时，所以带 8 次重试。
+
+⚠️ 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 给「信号源」打开（只需开一次）。
+它写的是 `/chperm/preapp/{AppWhiteList,keeprunning,popwindowwhitelist}`；
+同时务必确认包名**不在** `killbackground`（后台必杀）里。
+
+⚠️ 副作用：自愈成功后会软重启 zygote，开机 1~2 分钟内桌面会重新加载一次。
 
 ## 逆向备忘（别再重复摸索）
 

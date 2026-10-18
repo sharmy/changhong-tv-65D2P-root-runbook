@@ -40,6 +40,11 @@ public class SwitchActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // 每次打开本 app 都确保「自愈周期任务」已注册（JobScheduler 会持久化，
+        // 开机后由系统自己拉起 —— 长虹会拦第三方 app 的 BOOT_COMPLETED，
+        // 广播靠不住，只能靠系统调度器兜底）
+        Healer.schedule(getApplicationContext());
+
         String src = "E_INPUT_SOURCE_HDMI";
         // adb 调试用：am start -n org.sharmy.chsource/.Hdmi1 --es source __LIST__
         String fromIntent = getIntent() == null ? null : getIntent().getStringExtra(META_SOURCE);
@@ -67,6 +72,30 @@ public class SwitchActivity extends Activity {
             msg = goHome(false);
         } else if ("__SYS__".equals(src)) {
             msg = goHome(true);
+        } else if ("__ADB__".equals(src)) {
+            // 调试：验证 app 能否连本机 root adbd 执行命令（--es cmd "id"）
+            final String c = getIntent().getStringExtra("cmd") == null
+                    ? "id" : getIntent().getStringExtra("cmd");
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    String h = getIntent().getStringExtra("host");
+                    if (h == null || h.length() == 0) { h = "127.0.0.1"; }
+                    final String r = MiniAdb.shell(h, 5555, c, 5000);
+                    Log.i(TAG, "adb(" + c + ") => " + r);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), r, Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
+            }).start();
+            msg = "adb 执行中，结果见 logcat / Toast";
+        } else if ("__HEAL__".equals(src)) {
+            // 手动触发一次开机自愈（不重启电视也能验证）
+            startService(new android.content.Intent(this, SelfHealService.class));
+            msg = "自愈已触发，看 logcat ChSourceHeal";
         } else {
             msg = switchTo(getApplicationContext(), src);
         }
@@ -92,6 +121,11 @@ public class SwitchActivity extends Activity {
      * @param stopVideo true=先 stop() 停视频层（推荐），false=只发 HOME（对照用）
      */
     private String goHome(boolean stopVideo) {
+        return HomeUtil.goHome(getApplicationContext(), stopVideo);
+    }
+
+    /** 旧实现，仅留作对照，不再调用 */
+    private String goHomeLegacyUnused(boolean stopVideo) {
         StringBuilder d = new StringBuilder();
         String cur = "";
         if (stopVideo) {

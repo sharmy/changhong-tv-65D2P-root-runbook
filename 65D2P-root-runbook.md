@@ -554,6 +554,71 @@ adb shell 'sendevent /dev/input/event0 1 91 1; \
   `umount`，再 push，再 mount。
 - 想省事只改 `event3` 那份（`Vendor_046d_...`）没有用，遥控器走的是 `event0`。
 
+### 3.7.3 让电视重启后自己重挂 keylayout（不依赖电脑）★2026-10-18 真重启验证通过
+
+§3.7.2 的 bind mount 重启即失效。要求：**电视端自解决**，不许在 Mac 上挂任何常驻/定时任务，
+也不许用悬浮窗（遥控器点不到）。
+
+**先排除掉的路（别再试了）**
+
+| 思路 | 结论 |
+|---|---|
+| `mount -o remount,rw /system` | `Operation not permitted`（root 下也一样；`/system` 是 `ext4 ro,norecovery` 的 eMMC 分区 `/dev/block/platform/hi_mci.1/by-name/system`，内核不放行） |
+| `/data/system/devices/keylayout/` 覆盖 | **无效**：AOSP 查询顺序是 `/system/usr/` **优先**，只有系统侧不存在才回落到 `/data/system/devices/` |
+| init 钩子（`/etc/script/*.sh`、`install-recovery.sh`） | 全在只读区：`/etc -> /system/etc`，rootfs 也是 `rootfs ro` |
+| `/system/xbin/su` | `-rwsr-x--- root:shell`，第三方 app 不在 shell 组 |
+| `/system/xbin/csu` | setuid root 但有 uid 白名单：`uid 10026 not allowed` |
+| **静态广播 BOOT_COMPLETED** | **被长虹拦掉**，进程根本拉不起来 |
+
+**突破口**：本机 adbd 以 root 运行且 `ro.adb.secure=0`（不校验 RSA），于是 app 走
+`127.0.0.1:5555` 用 adb 协议直接拿到 root shell —— 全程电视内部完成，不需要电脑也不需要 root 权限。
+（`MiniAdb.java`：24 字节头 `command/arg0/arg1/data_length/data_check/magic`，
+`CNXN → OPEN(shell:) → WRTE/OKAY → CLSE`。）
+
+**触发方式（实测）**
+
+1. **`CONNECTIVITY_CHANGE` 真实广播能收到**（开机联网后很早）。注意：`am broadcast` 手动发的
+   一律收不到，只有系统自己发的能到；`BOOT_COMPLETED` / `USER_PRESENT` / `SCREEN_ON` /
+   `MY_PACKAGE_REPLACED` 手动发也收不到。
+2. **JobScheduler 是真正的兜底**。双任务：
+   - `JOB 6511`：一次性 + 自续期，`setMinimumLatency(60s).setOverrideDeadline(120s).setPersisted(true)`，
+     每次跑完再排下一次。
+   - `JOB 6510`：周期 15 分钟兜底（API 22 允许的最小周期）。
+
+**为什么不能只用周期任务**：周期任务重启后要等整整一个周期才首次执行（实测约 13 分钟）。
+而一次性任务的 `deadline` 存的是"绝对时刻"，电视正常开几小时后该值早已过期，
+JobScheduler 重启一恢复就判定 overdue，**1~2 分钟内立刻执行**。
+
+**⚠️ 两个必踩的坑**
+
+- `JobService` 的 `android:exported` **必须是 `true`**。写成 `false` 时任务状态一直是
+  `READY` 却永远不执行，而且**不报任何错** —— 排查了很久才定位到（JobScheduler 以
+  system uid 1000 身份来绑定服务）。
+- `adbd 同时只认一个连接`。Mac 连着的时候电视端自连必然 `SocketTimeoutException`，
+  所以 `Healer` 里带 8 次重试，每次失败先走一遍三行配方重启 adbd。
+
+**电视管家侧必须开的权限**（用户手动开一次即可，永久生效）：
+设置 → 电视管家 → 权限管理 → 自动启动管理 / 后台运行 → 信号源 = 开。
+它实际写的是 `/chperm/preapp/`：
+
+| 文件 | 作用 | 信号源应在 |
+|---|---|---|
+| `AppWhiteList` | 应用白名单 | ✅ 在 |
+| `keeprunning` | 保活白名单（不在里面的进程被 system_server **keepkilling** 杀掉，日志 `--this one is in keepkilling file ,so kill it--`） | ✅ 在 |
+| `killbackground` | **后台必杀名单** | ❌ **绝不能在** |
+| `popwindowwhitelist` | 悬浮窗白名单 | ✅ 在（已不用悬浮窗，留着无害） |
+
+**真重启验证（2026-10-18 22:2x）**
+
+| 检查项 | 结果 |
+|---|---|
+| 重启后 `grep -c keylayout /proc/mounts` | **2**（自动恢复，无人工干预） |
+| logcat | `[android.net.conn.CONNECTIVITY_CHANGE] 探测挂载数=0` → 重试 → `MOUNTS=2` → `ctl.restart zygote` |
+| 切 HDMI1 后 `sendevent /dev/input/event0 1 91` | 前台 `AtvMainActivity` → `com.dangbei.tvlauncher` ✅ |
+
+**副作用**：自愈成功后会 `setprop ctl.restart zygote`（软重启 UI，约 30 秒），
+开机后 1~2 分钟内会看到桌面重新加载一次。这是必需的 —— inputflinger 开机时已读过旧键表。
+
 ## 4. C. 封死 OTA（三层）
 
 ### 层 1 — 光猫网址过滤（网络层，已配置）

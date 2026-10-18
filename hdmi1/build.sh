@@ -24,11 +24,13 @@ echo "▸ 1/5 编译资源（aapt2 compile + link）"
     --manifest AndroidManifest.xml \
     --min-sdk-version 22 --target-sdk-version 22 \
     --java "$OUT/gen" \
+    -A assets \
     "$OUT/res.zip"
 
 echo "▸ 2/5 编译 Java（javac → .class）"
+find src -name '*.java' > "$OUT/sources.txt"
 "$JAVAC" -source 8 -target 8 -bootclasspath "$PLAT/android.jar" \
-    -d "$OUT/classes" src/org/sharmy/chsource/SwitchActivity.java
+    -d "$OUT/classes" @"$OUT/sources.txt"
 
 echo "▸ 3/5 打包 dex（d8）"
 (cd "$OUT/classes" && "$JDK/bin/jar" cf ../classes.jar .)

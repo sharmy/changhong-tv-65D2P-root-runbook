@@ -58,8 +58,12 @@ public final class Healer {
     private static final long MIN_GAP_MS = 30 * 1000L;
     private static final String PREFS = "heal";
     private static final String K_LAST = "last_attempt";
-    /** keylayout 已挂载、但框架还没重启成功（键表尚未生效） */
-    private static final String K_PENDING = "pending_restart";
+    /** 本次 keylayout 挂载成功时的开机时长（ms），用来判断 system_server 是不是在它之后启动的 */
+    private static final String K_MOUNT_UP = "mount_uptime";
+    /** 已确认 system_server 晚于挂载时刻启动（键表已生效） */
+    private static final String K_CONFIRMED = "confirmed";
+    /** 上次跑时的开机时长，用来识别"中间重启过" */
+    private static final String K_LAST_UP = "last_uptime";
 
     private Healer() {
     }
@@ -133,11 +137,18 @@ public final class Healer {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         long now = System.currentTimeMillis();
         long last = sp.getLong(K_LAST, 0L);
-        if (now - last < MIN_GAP_MS) {
+        // 墙钟时间在重启后是连续的，判断不了"是不是刚重启"；但 elapsedRealtime
+        // （开机时长）会归零 —— 上次记的比现在还大，就说明中间重启过。
+        // 重启后第一次必须真跑：2026-10-27 那次 BOOT_COMPLETED 因为距上次仅 25 秒
+        // 被节流跳过，白白多等了一个巡检周期才修好。
+        long up = android.os.SystemClock.elapsedRealtime();
+        long lastUp = sp.getLong(K_LAST_UP, -1L);
+        boolean rebooted = (lastUp < 0L) || (up < lastUp);
+        if (!rebooted && now - last < MIN_GAP_MS) {
             Log.i(TAG, "[" + trigger + "] 距离上次仅 " + ((now - last) / 1000) + "s，节流跳过");
             return true;      // 不是失败，别把间隔缩回高频
         }
-        sp.edit().putLong(K_LAST, now).commit();
+        sp.edit().putLong(K_LAST, now).putLong(K_LAST_UP, up).commit();
 
         // 1) 先看是不是已经挂好了 —— 直接读 /proc/mounts，不需要 root、不需要 adb。
         //    这样"已挂载"这个常态下完全不产生连接，只有真掉了才去连 adbd。
@@ -148,12 +159,14 @@ public final class Healer {
             Log.i(TAG, "[" + trigger + "] 本地读不到，退回 adb 探测 => " + probe.trim());
         }
         // 挂上 ≠ 生效：inputflinger 跑在 system_server 里，只有框架重启才会重读
-        // keylayout。所以"挂载 OK 但还没重启成功"要一直记着，下次接着重启
-        // （2026-10-27 的故障就是这个：挂载数是 2，但 system_server 从开机起
-        //   没重启过，按主页键毫无反应）。
-        boolean pending = sp.getBoolean(K_PENDING, false);
-        Log.i(TAG, "[" + trigger + "] 挂载数=" + n + "  待重启框架=" + pending + "  fd=" + fdCount());
-        if (n >= 2 && !pending) {
+        // keylayout（2026-10-27 的故障就是这个：挂载数是 2，但 system_server 从开机起
+        // 没重启过，按主页键毫无反应）。
+        // ⚠ 别用"我重启过没有"这种自证标志：重启框架会把本 app 一起杀掉，
+        //   根本来不及落盘，于是标志永远清不掉 → 每 5 分钟重启一次框架（画面反复重载）。
+        //   改成看事实：system_server 的启动时刻是不是晚于本次挂载时刻。
+        boolean confirmed = sp.getBoolean(K_CONFIRMED, false);
+        Log.i(TAG, "[" + trigger + "] 挂载数=" + n + "  键表已生效=" + confirmed + "  fd=" + fdCount());
+        if (n >= 2 && confirmed) {
             Log.i(TAG, "已挂载且键表已生效，跳过");
             return true;
         }
@@ -186,23 +199,64 @@ public final class Healer {
                 Log.e(TAG, "自愈失败：8 次都没挂上  fd=" + fdCount());
                 return false;
             }
-            sp.edit().putBoolean(K_PENDING, true).commit();
-            Log.i(TAG, "keylayout 已挂载，接下来必须重启框架让键表生效");
+            sp.edit().putLong(K_MOUNT_UP, android.os.SystemClock.elapsedRealtime())
+                    .putBoolean(K_CONFIRMED, false).commit();
+            Log.i(TAG, "keylayout 已挂载，接下来得让 system_server 在它之后重启，键表才生效");
         }
 
-        // 3) 重启框架。bootcomplete 之前发 ctl.restart 会被 init 直接忽略 ——
-        //    开机早期那次自愈就是这么白干一场的，所以先等系统起来。
+        // 3) 看事实：system_server 是不是在本次挂载之后才启动的
+        long mountUp = sp.getLong(K_MOUNT_UP, -1L);
+        if (mountUp < 0L) {
+            // 挂载是旧版本做的、没留时刻记录。别自作主张重启框架（会白白重载一次画面），
+            // 按"挂载发生在开机时刻"处理：system_server 只要在开机之后启动就算已生效。
+            Log.i(TAG, "旧版挂载无时刻记录，按开机时刻处理");
+            sp.edit().putLong(K_MOUNT_UP, 0L).commit();
+            mountUp = 0L;
+        }
+        long mountSec = mountUp / 1000L;
+        long ss = ssStartSec();
+        if (ss > 0 && mountSec > 0 && ss > mountSec) {
+            sp.edit().putBoolean(K_CONFIRMED, true).commit();
+            Log.i(TAG, "system_server 启动于开机后 " + ss + "s，晚于挂载时刻 "
+                    + mountSec + "s → 键表已生效");
+            return true;
+        }
+        // 判断不了（读不到 ps / 没记录挂载时刻）就别乱重启，下一轮再说
+        if (ss < 0 || mountSec < 0) {
+            Log.w(TAG, "无法判定（ss=" + ss + " mountSec=" + mountSec + "），本轮不动");
+            return false;
+        }
+
+        // 4) 确实还没生效 → 重启框架。bootcomplete 之前发 ctl.restart 会被 init
+        //    直接忽略（开机早期那次自愈就是这么白干一场的），所以先等系统起来。
         if (!waitBootCompleted()) {
             Log.w(TAG, "系统还没 bootcomplete，推迟到下一轮再重启框架");
             return false;
         }
-        if (restartFramework(ctx)) {
-            sp.edit().putBoolean(K_PENDING, false).commit();
-            Log.i(TAG, "框架已重启，键表生效");
+        if (restartFramework()) {
+            Log.i(TAG, "框架已重启，下一轮确认键表生效");
             return true;
         }
-        Log.e(TAG, "框架重启失败，保持 pending，下一轮继续");
+        Log.e(TAG, "框架重启失败，下一轮继续");
         return false;
+    }
+
+    /**
+     * system_server 的启动时刻（开机后第几秒）。
+     * 取 /proc/<pid>/stat 第 22 字段 starttime（单位 clock tick，本机 USER_HZ=100）。
+     * @return 秒；读不到返回 -1
+     */
+    private static long ssStartSec() {
+        String info = ssInfo();          // pid:tick
+        int i = info.indexOf(':');
+        if (i < 0) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(info.substring(i + 1)) / 100L;
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     /** 等系统真正起来（dev.bootcomplete=1），最多 2 分钟 */
@@ -227,24 +281,24 @@ public final class Healer {
      *
      * @return 框架是否真的换了个 system_server（用 /proc/<pid>/stat 的 starttime 判定）
      */
-    private static boolean restartFramework(Context ctx) {
+    private static boolean restartFramework() {
         String before = ssInfo();
         Log.i(TAG, "重启前 system_server=" + before);
         MiniAdb.shell(H, P, "setprop ctl.restart zygote", 8000);
-        if (waitRestart(ctx, before, 15)) {
+        if (waitRestart(before, 15)) {
             return true;
         }
         String pid = before.contains(":") ? before.substring(0, before.indexOf(':')) : "";
         if (pid.matches("\\d+")) {
             Log.w(TAG, "ctl.restart 没生效，直接 kill -9 " + pid);
             MiniAdb.shell(H, P, "kill -9 " + pid, 8000);
-            return waitRestart(ctx, before, 24);
+            return waitRestart(before, 24);
         }
         return false;
     }
 
     /** 轮询 system_server 的 (pid:starttime) 是否变化，每次隔 5 秒 */
-    private static boolean waitRestart(Context ctx, String before, int tries) {
+    private static boolean waitRestart(String before, int tries) {
         if (before.length() == 0) {
             return false;
         }
@@ -253,10 +307,6 @@ public final class Healer {
             String now = ssInfo();
             if (now.length() > 0 && !now.equals(before)) {
                 Log.i(TAG, "框架已重启：" + before + " -> " + now);
-                // ⚠ 抢在进程被 zygote 重启杀掉之前落盘，否则会白重启一次
-                //   （画面重载两回，用户看得见）
-                ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                        .edit().putBoolean(K_PENDING, false).commit();
                 return true;
             }
         }
@@ -265,7 +315,11 @@ public final class Healer {
 
     /** 取 system_server 的 `pid:starttime`，starttime 变了就说明进程换过 */
     private static String ssInfo() {
-        String out = MiniAdb.shell(H, P, "ps | grep system_server | awk 'NR==1{print $2}'", 5000).trim();
+        // ⚠ 必须 grep -v grep：shell 命令行里也含 "system_server"，ps 会把 grep
+        //   自己列出来，NR==1 就可能取到它 —— 而它读完就退出了，/proc/<pid>/stat
+        //   已经没了，读出来是空（表现为 ss=-1，"无法判定"）。
+        String out = MiniAdb.shell(H, P,
+                "ps | grep system_server | grep -v grep | awk 'NR==1{print $2}'", 5000).trim();
         String pid = digits(out);
         if (pid.length() == 0) {
             return "";

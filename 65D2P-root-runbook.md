@@ -757,6 +757,35 @@ adb shell awk '{print $22}' /proc/$SS/stat                          # starttime(
   `platform-30_r03`、JDK 17（国内可用腾讯 Kona）。
   `hdmi1/build.sh` 已改成自动探测并在缺件时直接打印下载命令。
 
+### 3.7.6 别用「我重启过没有」当标志：app 会被自己发起的重启杀掉 ★2026-10-27
+
+§3.7.5 第一版实现用了"挂载 OK 但框架没重启 → 记 `pending`，下轮接着补"。
+**这个标志永远清不掉**：`ctl.restart zygote` 会把 zygote 的所有子进程一起杀掉，
+本 app 就在里面 —— 进程没了，那句 `commit()` 根本来不及执行。
+
+后果很直观：每 4~6 分钟重启一次框架，**电视画面反复重载**。止血是 root 下直接改
+`/data/data/org.sharmy.chsource/shared_prefs/heal.xml`（电视没有 `sed`，用
+`busybox sed -i`）。
+
+**正确判据：比较时刻，不看自证标志。**
+
+```
+system_server 启动时刻(秒) > 本次 keylayout 挂载时刻(秒)  →  键表已生效
+```
+
+- 挂载成功时记 `mount_uptime = SystemClock.elapsedRealtime()`
+- `system_server` 的启动时刻取 `/proc/<pid>/stat` 第 22 字段（clock tick，本机 USER_HZ=100）
+- 确认后记 `confirmed=true`，之后**零 adb 连接**（挂载时刻和启动时刻都在本地/一次读取内）
+- 判断不了（读不到 ps）就**本轮不动**，绝不能"猜"着重启 —— 那比不修更烦人
+
+**两个附带坑**
+
+- `ps | grep system_server` 必须加 `grep -v grep`：shell 命令行里也含这个字符串，
+  `ps` 会把 grep 自己列出来，`NR==1` 可能取到它的 pid，而它读完就退出了，
+  `/proc/<pid>/stat` 已不存在 → 读出空值 → 表现成"无法判定"。
+- 电脑连着 adb 时，电视端自连 `127.0.0.1:5555` 必然超时，所有这类探测都会失败。
+  排查时看到 `ss=-1` 先想想自己是不是还占着连接位（要 `adb kill-server`）。
+
 ### 3.8 自定义开机画面（把开机图换成自己的照片）★2026-10-18 22:45 实机验证通过
 
 既然 §3.6 已经把开机广告根除，开机那几秒空出来了 —— 可以拿来放自己的照片。

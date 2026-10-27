@@ -121,14 +121,36 @@
             android:exported="false" />
 
         <!--
+          常驻守护（前台服务）。这台电视禁止第三方 app 自启动：进程一死，
+          JobScheduler 和 AlarmManager 都拉不回来（实测闹钟有 wakeup 但 receiver
+          不被调用）。所以只能靠前台服务把进程钉住 —— 否则自愈重启框架时会把自己
+          杀掉，之后永久失效。
+        -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false" />
+
+        <!--
           JobScheduler 执行体：长虹会拦第三方 BOOT_COMPLETED，靠系统调度器兜底。
           ⚠️ exported 必须为 true —— JobScheduler 以 system(uid 1000) 身份来绑定，
              写成 false 会导致任务一直 READY 却永远执行不了（不报错，极难排查）。
+          ⚠️ 但它在这台电视上有个硬伤：app 进程退出后不会再被拉起（Job 挂在那儿
+             overdue 也不动）。所以真正扛事的是下面的 AlarmReceiver。
         -->
         <service
             android:name=".HealJobService"
             android:permission="android.permission.BIND_JOB_SERVICE"
             android:exported="true" />
+
+        <!--
+          AlarmManager 闹钟：每 3 分钟唤醒一次。它是唯一能把"已死的 app 进程"
+          重新拉起来的路（系统闹钟 → PendingIntent → 启动进程）。
+          显式 PendingIntent，exported=false 即可。
+        -->
+        <receiver
+            android:name=".AlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <!--
           触发自愈的广播：实测 BOOT_COMPLETED 被长虹拦掉（进程都拉不起来），

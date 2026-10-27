@@ -2,6 +2,7 @@ package org.sharmy.chsource;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
@@ -44,6 +45,11 @@ public class SwitchActivity extends Activity {
         // 开机后由系统自己拉起 —— 长虹会拦第三方 app 的 BOOT_COMPLETED，
         // 广播靠不住，只能靠系统调度器兜底）
         Healer.schedule(getApplicationContext());
+        // 顺手把常驻守护叫起来（用户点过一次图标之后就不用再操心它了）
+        try {
+            startService(new Intent(this, KeepAliveService.class));
+        } catch (Throwable ignore) {
+        }
 
         String src = "E_INPUT_SOURCE_HDMI";
         // adb 调试用：am start -n org.sharmy.chsource/.Hdmi1 --es source __LIST__

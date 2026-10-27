@@ -3,7 +3,9 @@ package org.sharmy.chsource;
 import android.app.job.JobInfo;
 import android.app.job.JobScheduler;
 import android.content.ComponentName;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.util.Log;
 
@@ -68,8 +70,33 @@ public final class Healer {
     private Healer() {
     }
 
-    /** 注册自愈任务：主力一次性任务 + 周期兜底任务（都持久化，重启后系统自己拉起） */
+    /** 闹钟周期：3 分钟。常态下这只是一次本地读 /proc/mounts，开销可以忽略 */
+    private static final long ALARM_PERIOD_MS = 3 * 60 * 1000L;
+
+    /**
+     * 用 AlarmManager 定时唤醒。
+     * 必须有这条：长虹定制系统里 app 进程死了之后，JobScheduler 不会把它拉起来
+     * （见 AlarmReceiver 的注释），而闹钟能穿透。
+     */
+    static void scheduleAlarm(Context ctx) {
+        try {
+            android.app.AlarmManager am =
+                    (android.app.AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+            Intent i = new Intent(ctx, AlarmReceiver.class);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    ctx, 0, i, PendingIntent.FLAG_UPDATE_CURRENT);
+            am.setRepeating(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    android.os.SystemClock.elapsedRealtime() + ALARM_PERIOD_MS,
+                    ALARM_PERIOD_MS, pi);
+            Log.i(TAG, "闹钟已注册：每 " + (ALARM_PERIOD_MS / 60000) + " 分钟唤醒一次");
+        } catch (Throwable t) {
+            Log.e(TAG, "scheduleAlarm 失败", t);
+        }
+    }
+
+    /** 注册自愈任务：闹钟主力 + 一次性/周期 Job 兜底 */
     static void schedule(Context ctx) {
+        scheduleAlarm(ctx);
         try {
             JobScheduler js = (JobScheduler) ctx.getSystemService(Context.JOB_SCHEDULER_SERVICE);
             ComponentName cn = new ComponentName(ctx, HealJobService.class);
@@ -228,10 +255,12 @@ public final class Healer {
         }
 
         // 4) 确实还没生效 → 重启框架。bootcomplete 之前发 ctl.restart 会被 init
-        //    直接忽略（开机早期那次自愈就是这么白干一场的），所以先等系统起来。
+        //    直接忽略（开机早期那次自愈就是这么白干一场的），所以先尽量等系统起来。
+        //    ⚠ 但绝不能把 bootcomplete 当硬门槛：这台电视开机要 3 分钟以上才置 1，
+        //      等不到就直接放弃的话，永远修不上（2026-10-27 两次故障都是这个）。
+        //      超时就硬来 —— kill -9 system_server 不看 init 脸色，一定生效。
         if (!waitBootCompleted()) {
-            Log.w(TAG, "系统还没 bootcomplete，推迟到下一轮再重启框架");
-            return false;
+            Log.w(TAG, "等 bootcomplete 超时，不再等，直接硬重启框架");
         }
         if (restartFramework()) {
             Log.i(TAG, "框架已重启，下一轮确认键表生效");
@@ -259,9 +288,9 @@ public final class Healer {
         }
     }
 
-    /** 等系统真正起来（dev.bootcomplete=1），最多 2 分钟 */
+    /** 等系统真正起来（dev.bootcomplete=1），最多 90 秒（再久就不等，直接硬重启） */
     private static boolean waitBootCompleted() {
-        for (int i = 0; i < 24; i++) {
+        for (int i = 0; i < 18; i++) {
             String v = MiniAdb.shell(H, P, "getprop dev.bootcomplete; getprop sys.boot_completed", 5000);
             if (v.trim().contains("1")) {
                 return true;

@@ -28,6 +28,14 @@ public class BootReceiver extends BroadcastReceiver {
         // 不管这次广播是哪来的，都顺手把周期任务注册上（幂等）
         Healer.schedule(app);
 
+        // 拉起常驻守护。这是最要紧的一步：这台电视上进程一旦退出就再也拉不回来
+        // （Job/闹钟都不行），所以每次抓到广播都顺手把它叫起来。
+        try {
+            app.startService(new Intent(app, KeepAliveService.class));
+        } catch (Throwable t) {
+            Log.e(TAG, "启动 KeepAliveService 失败", t);
+        }
+
         try {
             Intent svc = new Intent(app, SelfHealService.class);
             svc.putExtra("trigger", a);

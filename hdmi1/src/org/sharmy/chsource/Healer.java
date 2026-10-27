@@ -58,6 +58,8 @@ public final class Healer {
     private static final long MIN_GAP_MS = 30 * 1000L;
     private static final String PREFS = "heal";
     private static final String K_LAST = "last_attempt";
+    /** keylayout 已挂载、但框架还没重启成功（键表尚未生效） */
+    private static final String K_PENDING = "pending_restart";
 
     private Healer() {
     }
@@ -145,38 +147,139 @@ public final class Healer {
             n = num(probe);
             Log.i(TAG, "[" + trigger + "] 本地读不到，退回 adb 探测 => " + probe.trim());
         }
-        Log.i(TAG, "[" + trigger + "] 挂载数=" + n + "  fd=" + fdCount());
-        if (n >= 2) {
-            Log.i(TAG, "已挂载，跳过");
+        // 挂上 ≠ 生效：inputflinger 跑在 system_server 里，只有框架重启才会重读
+        // keylayout。所以"挂载 OK 但还没重启成功"要一直记着，下次接着重启
+        // （2026-10-27 的故障就是这个：挂载数是 2，但 system_server 从开机起
+        //   没重启过，按主页键毫无反应）。
+        boolean pending = sp.getBoolean(K_PENDING, false);
+        Log.i(TAG, "[" + trigger + "] 挂载数=" + n + "  待重启框架=" + pending + "  fd=" + fdCount());
+        if (n >= 2 && !pending) {
+            Log.i(TAG, "已挂载且键表已生效，跳过");
             return true;
         }
 
-        // 2) 准备修复文件与脚本
-        copyAsset(ctx, A);
-        copyAsset(ctx, B);
-        File sh = writeScript(ctx);
-        Log.i(TAG, "脚本就绪：" + sh.getAbsolutePath());
+        // 2) 挂载丢了 → 准备修复文件与脚本
+        if (n < 2) {
+            copyAsset(ctx, A);
+            copyAsset(ctx, B);
+            File sh = writeScript(ctx);
+            Log.i(TAG, "脚本就绪：" + sh.getAbsolutePath());
 
-        // 3) 反复尝试：adbd 同时只认一个连接，失败多半是这个原因
-        for (int i = 1; i <= 8; i++) {
-            String out = MiniAdb.shell(H, P, "sh " + sh.getAbsolutePath(), 6000);
-            Log.i(TAG, "第 " + i + " 次尝试 => " + out.trim());
-            if (out.contains("MOUNTS=2")) {
-                // inputflinger 开机时已读过旧键表，必须软重启一次才生效
-                MiniAdb.shell(H, P, "setprop ctl.restart zygote", 6000);
-                Log.i(TAG, "keylayout 已挂载，已触发 zygote 重启（键表将重新加载）");
+            // 反复尝试：adbd 同时只认一个连接，失败多半是这个原因
+            boolean mounted = false;
+            for (int i = 1; i <= 8; i++) {
+                String out = MiniAdb.shell(H, P, "sh " + sh.getAbsolutePath(), 6000);
+                Log.i(TAG, "第 " + i + " 次尝试 => " + out.trim());
+                if (out.contains("MOUNTS=2")) {
+                    mounted = true;
+                    break;
+                }
+                // 别每次都重启 adbd —— 那要 5 秒，8 轮就是 40 秒，还会把电脑上
+                // 正在连着的 adb 踢掉。隔一轮重启一次，够用了。
+                if (i % 2 == 0) {
+                    toggleAdb();
+                } else {
+                    sleep(1500);
+                }
+            }
+            if (!mounted) {
+                Log.e(TAG, "自愈失败：8 次都没挂上  fd=" + fdCount());
+                return false;
+            }
+            sp.edit().putBoolean(K_PENDING, true).commit();
+            Log.i(TAG, "keylayout 已挂载，接下来必须重启框架让键表生效");
+        }
+
+        // 3) 重启框架。bootcomplete 之前发 ctl.restart 会被 init 直接忽略 ——
+        //    开机早期那次自愈就是这么白干一场的，所以先等系统起来。
+        if (!waitBootCompleted()) {
+            Log.w(TAG, "系统还没 bootcomplete，推迟到下一轮再重启框架");
+            return false;
+        }
+        if (restartFramework(ctx)) {
+            sp.edit().putBoolean(K_PENDING, false).commit();
+            Log.i(TAG, "框架已重启，键表生效");
+            return true;
+        }
+        Log.e(TAG, "框架重启失败，保持 pending，下一轮继续");
+        return false;
+    }
+
+    /** 等系统真正起来（dev.bootcomplete=1），最多 2 分钟 */
+    private static boolean waitBootCompleted() {
+        for (int i = 0; i < 24; i++) {
+            String v = MiniAdb.shell(H, P, "getprop dev.bootcomplete; getprop sys.boot_completed", 5000);
+            if (v.trim().contains("1")) {
                 return true;
             }
-            // 别每次都重启 adbd —— 那要 5 秒，8 轮就是 40 秒，还会把电脑上
-            // 正在连着的 adb 踢掉。隔一轮重启一次，够用了。
-            if (i % 2 == 0) {
-                toggleAdb();
-            } else {
-                sleep(1500);
+            sleep(5000);
+        }
+        return false;
+    }
+
+    /**
+     * 重启 Android 框架，让 inputflinger 重新加载 keylayout。
+     *
+     * inputflinger 不是独立进程，它在 system_server 里（本机 `init.svc.inputflinger`
+     * 为空，`ps` 也没有 inputflinger），所以只有把 system_server 干掉重来才会重读键表。
+     * 两招：先客气地 `ctl.restart zygote`；不生效就直接 `kill -9 system_server`
+     * （zygote 发现 system_server 死了会自杀，init 再拉起来，等于软重启）。
+     *
+     * @return 框架是否真的换了个 system_server（用 /proc/<pid>/stat 的 starttime 判定）
+     */
+    private static boolean restartFramework(Context ctx) {
+        String before = ssInfo();
+        Log.i(TAG, "重启前 system_server=" + before);
+        MiniAdb.shell(H, P, "setprop ctl.restart zygote", 8000);
+        if (waitRestart(ctx, before, 15)) {
+            return true;
+        }
+        String pid = before.contains(":") ? before.substring(0, before.indexOf(':')) : "";
+        if (pid.matches("\\d+")) {
+            Log.w(TAG, "ctl.restart 没生效，直接 kill -9 " + pid);
+            MiniAdb.shell(H, P, "kill -9 " + pid, 8000);
+            return waitRestart(ctx, before, 24);
+        }
+        return false;
+    }
+
+    /** 轮询 system_server 的 (pid:starttime) 是否变化，每次隔 5 秒 */
+    private static boolean waitRestart(Context ctx, String before, int tries) {
+        if (before.length() == 0) {
+            return false;
+        }
+        for (int i = 0; i < tries; i++) {
+            sleep(5000);
+            String now = ssInfo();
+            if (now.length() > 0 && !now.equals(before)) {
+                Log.i(TAG, "框架已重启：" + before + " -> " + now);
+                // ⚠ 抢在进程被 zygote 重启杀掉之前落盘，否则会白重启一次
+                //   （画面重载两回，用户看得见）
+                ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .edit().putBoolean(K_PENDING, false).commit();
+                return true;
             }
         }
-        Log.e(TAG, "自愈失败：8 次都没挂上  fd=" + fdCount());
         return false;
+    }
+
+    /** 取 system_server 的 `pid:starttime`，starttime 变了就说明进程换过 */
+    private static String ssInfo() {
+        String out = MiniAdb.shell(H, P, "ps | grep system_server | awk 'NR==1{print $2}'", 5000).trim();
+        String pid = digits(out);
+        if (pid.length() == 0) {
+            return "";
+        }
+        String t = digits(MiniAdb.shell(H, P, "awk '{print $22}' /proc/" + pid + "/stat", 5000).trim());
+        return pid + ":" + t;
+    }
+
+    private static String digits(String s) {
+        if (s == null) {
+            return "";
+        }
+        String d = s.replaceAll("[^0-9]", "");
+        return d;
     }
 
     /** 重启 root adbd：三行配方（长虹 init 补丁 + service.adb.root） */

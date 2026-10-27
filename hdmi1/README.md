@@ -168,7 +168,17 @@ APK 里的「回到系统桌面」图标（`__SYS__`）仍保留，作为不依�
 它写的是 `/chperm/preapp/{AppWhiteList,keeprunning,popwindowwhitelist}`，并把包名从
 `killbackground`（后台必杀）里移除；这份名单 system_server 开机只读一次，**不重启不生效**。
 
-⚠️ 副作用：自愈成功后会软重启 zygote，开机 1~2 分钟内桌面会重新加载一次。
+⚠️ 副作用：自愈成功后会软重启框架，开机 1~2 分钟内桌面会重新加载一次。
+
+**挂载 ≠ 生效**：keylayout 是 inputflinger 在打开设备时读进内存的，而它跑在
+**system_server 进程里**（本机 `init.svc.inputflinger` 为空、也没有这个进程），
+所以挂载之后**必须把框架重启**键表才生效，否则就是"挂载数=2 但按主页键没反应"
+（2026-10-27 的故障）。
+
+流程已经固化在 `Healer` 里：挂载 → 等 `dev.bootcomplete=1`
+（开机早期发 `ctl.restart` 会被 init 直接忽略）→ `ctl.restart zygote`
+→ 校验 `system_server` 的 `pid:starttime` 真变了 → 没变就 `kill -9` 硬来
+→ 并把 `pending` 状态落盘，下一轮接着补。
 
 ## 逆向备忘（别再重复摸索）
 

@@ -381,7 +381,25 @@ case "$1" in
     echo "▸ 覆盖后的主页键映射："
     tv 'busybox grep "key 91" /system/usr/keylayout/Vendor_0001_Product_0001.kl /system/usr/keylayout/Vendor_046d_Product_0002.kl'
     echo "▸ 重启框架让 inputflinger 重新加载 keymap（约 30 秒，画面会闪一下）"
+    # ⚠ 光发 ctl.restart 不够：bootcomplete 之前发会被 init 直接忽略（2026-10-27 踩过，
+    #   表现是"挂载数是 2，但按主页键毫无反应"）。发完必须校验 system_server 真换了，
+    #   没换就 kill -9 硬来（zygote 发现 system_server 死了会自杀，init 重新拉起整个框架）。
+    sspid() { tv 'ps | grep system_server | awk "NR==1{print \$2}"' | tr -dc '0-9'; }
+    SS0="$(sspid)"; echo "   重启前 system_server pid=$SS0"
     tv 'setprop ctl.restart zygote' >/dev/null
+    SS1=""
+    for i in $(seq 1 18); do            # 最多等 90 秒
+      sleep 5
+      P="$(sspid)"
+      if [ -n "$P" ] && [ "$P" != "$SS0" ]; then SS1="$P"; break; fi
+    done
+    if [ -z "$SS1" ] && [ -n "$SS0" ]; then
+      echo "   ctl.restart 没生效，直接 kill -9 $SS0"
+      tv "kill -9 $SS0" >/dev/null
+      sleep 40
+      SS1="$(sspid)"
+    fi
+    echo "   重启后 system_server pid=${SS1:-未变（失败）}"
     echo "✅ 完成。等电视画面回来后，切到 HDMI 再按遥控器「主页」键即可回到当贝桌面"
     echo "   自检：./65d2p.sh shell 'sendevent /dev/input/event0 1 91 1; sendevent /dev/input/event0 1 91 0; sendevent /dev/input/event0 0 0 0'"
     echo "        再看 logcat 是否出现 keyCode=3 + START cat=[HOME] 当贝"

@@ -697,6 +697,66 @@ app 进程的 fd 上限是 **1024**。原先每 60~120 秒一轮、每轮最多 
 - `adb install -r` 之后系统会 `Force stopping ... pkg changed`，进程被杀，
   `MY_PACKAGE_REPLACED` 不会送达 → **装完必须手动启动一次 app**，让它把 Job 重新注册上。
 
+### 3.7.5 挂载数是 2、主页键却没反应：框架没重启，键表没重载 ★2026-10-27 定位并修复
+
+**现象**：`grep -c keylayout /proc/mounts` = **2**（自愈明明成功了），但按主页键毫无反应。
+`input keyevent 3` 却能正常回当贝 —— 说明 HOME 意图链路没问题，卡在
+**scan 91 → keycode 的转换**上。
+
+**根因**：keylayout 是 **inputflinger 在打开设备那一刻读进内存的**，之后改文件它不会重读。
+而本机 **inputflinger 不是独立进程**：
+
+```
+$ getprop init.svc.inputflinger   → 空
+$ ps | grep inputflinger          → 无
+```
+
+它跑在 **system_server 进程里**，所以只有把框架（system_server）重启了才会重新加载键表。
+自愈里那句 `setprop ctl.restart zygote` **发出去了但没生效** —— 自愈在开机早期跑，
+此时还没 `bootcomplete`，init 直接把 `ctl.restart` 给忽略了。
+
+**硬判据**（别靠"感觉"）：看 system_server 的启动时刻有没有变。
+
+```bash
+SS=$(adb shell ps | grep system_server | awk 'NR==1{print $2}')     # pid
+adb shell awk '{print $22}' /proc/$SS/stat                          # starttime(tick)
+```
+
+出事那次：pid=1985、starttime=754（开机 7.5 秒启动），uptime 已经 2800 秒了 ——
+**框架从头到尾没重启过**，那挂载得再漂亮也没用。
+
+**修复（APK 侧，Healer）**
+
+1. 挂载成功后不能算完，还得**重启框架**，并把"挂载 OK 但框架没重启成功"这个状态
+   持久化（`K_PENDING`），下一轮接着重启，避免一次失败就永久卡住。
+2. 重启**之前先等 `dev.bootcomplete=1`**（最多 2 分钟）—— 开机早期发 `ctl.restart`
+   会被 init 忽略，这是这次白干一场的直接原因。
+3. 重启**必须校验**：对比 `system_server` 的 `pid:starttime` 是否真的变了。
+   - 先客气：`setprop ctl.restart zygote`
+   - 15 次 × 5 秒没变 → `kill -9 <system_server pid>`（zygote 发现它死了会自杀，
+     init 重新拉起，等于完整软重启）
+4. 检测到变化的**第一时间**就把 `pending` 落盘 —— app 进程马上会被 zygote 重启杀掉，
+   晚一点就丢，下一轮会白重启一次（用户看得见画面重载两回）。
+
+`65d2p.sh fix-keys` 同步加固（原来也是裸发 `ctl.restart`）：发完轮询 90 秒看 pid 变没变，
+没变就 `kill -9` 兜底。
+
+**验证（2026-10-27 22:3x）**：手工 `umount` 掉两个 bind mount → Mac 侧 `adb kill-server`
+把连接位让出来 → 5 分钟内电视自己完成：挂载数回 2、`system_server` 5158→9615（真重启了）、
+`sendevent /dev/input/event0 1 91` 触发 `START u0 {act=MAIN cat=[HOME]}` ✅
+
+**顺带三个坑**
+
+- **Mac 断开 adb 要用 `adb kill-server`**，只 `adb disconnect` 不够：adb server 还占着
+  adbd 唯一的连接位，电视端自连会一直 `SocketTimeoutException`（实测 8 次全超时）。
+- **重装 APK 会把包名重新写回 `/chperm/preapp/killbackground`**：
+  `PackageManager: --this one is not protect app---so killbackground&prevent receiver`。
+  即电视管家里的白名单会被安装动作冲掉，装完要重新处理一次（root 下
+  `grep -v 包名` 重写该文件，再重启生效）。
+- `/tmp` 被系统清过后，构建链要重装：`platform-tools`、`build-tools_r33.0.1-macosx`、
+  `platform-30_r03`、JDK 17（国内可用腾讯 Kona）。
+  `hdmi1/build.sh` 已改成自动探测并在缺件时直接打印下载命令。
+
 ### 3.8 自定义开机画面（把开机图换成自己的照片）★2026-10-18 22:45 实机验证通过
 
 既然 §3.6 已经把开机广告根除，开机那几秒空出来了 —— 可以拿来放自己的照片。

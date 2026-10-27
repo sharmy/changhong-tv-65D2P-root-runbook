@@ -4,7 +4,30 @@
 set -e
 cd "$(dirname "$0")"
 
-JDK="/tmp/android/jdk-17.0.20.1+1/Contents/Home"
+# ⚠ /tmp 会被系统清掉，JDK / build-tools 都得重装过。所以这里一律自动探测，
+#   找不到就把下载命令直接打出来（别让人再去翻历史记录）。
+if [ -n "$JDK_HOME" ] && [ -x "$JDK_HOME/bin/javac" ]; then
+  JDK="$JDK_HOME"
+else
+  JDK="$(ls -d /tmp/android/jdk-17*/Contents/Home /tmp/android/jdk-17*.jdk/Contents/Home \
+         2>/dev/null | head -1)"
+fi
+if [ ! -x "$JDK/bin/javac" ]; then
+  echo "❌ 找不到 JDK 17（/tmp 被清过？）。国内可直接下腾讯 Kona："
+  echo "   curl -sL -o /tmp/android/kona17.tar.gz https://cnb.cool/tencent/TencentKona/TencentKona-17/-/releases/download/TencentKona-17.0.14/TencentKona-17.0.14.b1_jdk_macosx-aarch64_notarized.tar.gz"
+  echo "   tar xzf /tmp/android/kona17.tar.gz -C /tmp/android"
+  exit 1
+fi
+if [ ! -x /tmp/android/bt_t/android-13/aapt2 ]; then
+  echo "❌ 找不到 build-tools。下载："
+  echo "   curl -sL -o /tmp/android/bt.zip https://dl.google.com/android/repository/build-tools_r33.0.1-macosx.zip && unzip -q -o /tmp/android/bt.zip -d /tmp/android/bt_t"
+  exit 1
+fi
+if [ ! -f /tmp/android/plat_t/android-11/android.jar ]; then
+  echo "❌ 找不到 android.jar(API 30)。下载："
+  echo "   curl -sL -o /tmp/android/plat.zip https://dl.google.com/android/repository/platform-30_r03.zip && unzip -q -o /tmp/android/plat.zip -d /tmp/android/plat_t"
+  exit 1
+fi
 BT="/tmp/android/bt_t/android-13"
 PLAT="/tmp/android/plat_t/android-11"
 AAPT2="$BT/aapt2"; D8="$BT/d8"; ZIPALIGN="$BT/zipalign"; APKSIGNER="$BT/apksigner"
